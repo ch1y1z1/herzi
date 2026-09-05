@@ -486,4 +486,5 @@ npm start
 - 本地仓库使用 `git init -b main` 初始化，Git 作者沿用现有全局配置。
 - GitHub CLI 创建 public repository [`ch1y1z1/herzi`](https://github.com/ch1y1z1/herzi)，描述为 “A local web GUI and structured chat client for the Herdr terminal multiplexer.”。
 - `origin` 使用现有 GitHub SSH 凭据配置为 `git@github.com:ch1y1z1/herzi.git`。
-- 首次提交和 push 状态将在命令完成后复核；远端可见性已通过 GitHub API 确认为 `PUBLIC`。
+- 首个 root commit 为 `44ba0ea`（`feat: initialize Herzi web client`），已通过 SSH 成功推送到 `origin/main` 并建立 upstream tracking。
+- GitHub API 复核确认仓库可见性为 `PUBLIC`，默认分支为 `main`；本记录随后作为独立 docs commit 推送。
