@@ -1,0 +1,307 @@
+# 调研与工作日志
+
+> 项目：Herzi（暂用工作目录名）  
+> 目标：Herdr 的 GUI/Web 前端，先支持 pi coding agent，并逐步提供原始 TUI 与结构化 Chat View。  
+> 所有日期采用本机时区（UTC+08:00）。
+
+## 2026-09-03
+
+### 15:04 — 建立文档规范
+
+- 确认项目根目录最初为空，尚无代码、`docs/` 或项目级 `AGENTS.md`。
+- 确认当前进程位于 Herdr 管理环境中：`HERDR_ENV=1`。
+- 阅读 Herdr 操作技能说明，明确：
+  - Herdr 具有 server/daemon、workspace、tab、pane、agent 等概念。
+  - CLI 能列举和读取 pane/agent，提供文本或 ANSI 快照；控制面可发送 prompt、按键及等待状态。
+  - `visible`、`recent`、`recent-unwrapped`、`detection` 是不同读取源。
+  - alternate screen 中已经离屏的内容可能无法从 Herdr host scrollback 恢复；这对可靠 Chat View 是关键限制，需要结合 pi 的结构化会话数据或实时事件采集。
+- 在根目录创建 `AGENTS.md`，加入硬性要求：所有过程文档必须进入 `docs/`。
+- 创建 `docs/README.md` 文档索引及本日志。
+
+### 待调研问题
+
+1. Herdr 当前公开 CLI、IPC、server/session 协议与许可证分别是什么？GUI 应调用 CLI、链接内部库，还是通过稳定 socket API？
+2. 是否能无损订阅 pane 的实时 PTY 输出、屏幕状态、尺寸和输入事件？
+3. pi 的会话 JSONL 存储位置、schema、分支/compaction 语义以及实时写入行为是什么？
+4. pi 是否有 extension/SDK 事件接口，可比“直接 tail JSONL”更稳地推送结构化 turn/tool/approval 状态？
+5. 用户提及的“Moshi Desktop / Moshi Hook / Chat View”和“ORCA Chat UI”具体指哪些产品/仓库？公开资料是否足以验证实现细节？如名称存在歧义，报告必须明确标注。
+6. 单进程本地 Web MVP 怎样同时支持原始 TUI、结构化 Chat View、输入与权限控制，并可平滑演进到 daemon + desktop client？
+
+### 15:05–15:25 — 核查本机 Herdr 与官方接口
+
+- 本机已安装 Herdr `0.8.2`，server 正在运行，socket protocol 为 `20`；默认 Unix socket 位于用户配置目录。只记录了 session 的名称/运行状态和协议元数据，没有读取任何 pane 输出或私人会话正文。
+- `herdr api schema --output docs/herdr-api-schema.json` 成功导出安装版本自带的完整 JSON Schema（约 255 KB），作为后续协议实现的版本化依据。
+- 官方 Socket API 文档确认：
+  - 传输为本地 socket 上的 LF 分隔 JSON；Unix 使用 Unix domain socket，Windows 使用 named pipe。
+  - `session.snapshot` 用于客户端冷启动；随后应订阅 workspace/tab/pane/layout/agent 等资源事件；重连后重新拉 snapshot。
+  - API 支持 pane 读取/输入、布局控制、agent 状态和事件订阅，但普通资源事件不是逐字节 PTY 输出流。
+  - 原始终端实时视图应使用 `herdr terminal session observe|control`：输出 `terminal.frame`（base64 ANSI bytes）与 `terminal.closed` JSONL；control 通过 stdin 接受 `terminal.input`、`terminal.resize`、`terminal.scroll`、`terminal.release`。同一终端可有多个 observer，但同一时间只有一个 controller，`--takeover` 会替换现有 controller。
+  - 官方建议简单自动化先走 CLI，直接 socket 适合自定义协议客户端和长期订阅。Web MVP 适合“资源面走 raw socket；终端面先包装官方 terminal session CLI”，避免重写未单独稳定化的终端流传输。
+- 官方集成文档确认 Pi 集成属于 lifecycle authority，并上报 native session identity；本机 `herdr integration status` 显示 Pi 集成已是 current（v8）。出于隐私，本次没有打开集成脚本或任何真实 Pi session 文件。
+- Herdr 服务器重启后普通进程不会继续；可恢复布局。Pi 如有当前官方集成提供的 session reference，可用 `pi --session <path>` 恢复 agent 会话。实验性 pane history 默认关闭，因为其中可能含密钥、提示词和命令输出。
+
+### 15:25–15:50 — 完整阅读相关 Pi 文档
+
+- 按 pi 项目要求完整阅读主 README，以及 `sessions.md`、`session-format.md`、`extensions.md`、`sdk.md`、`rpc.md`、`json.md`、`security.md`。
+- 当前本机 pi package 版本为 `0.84.4`。关键结论：
+  - Session 默认是 JSONL v3，位于 agent dir 下的 `sessions/`，每个 entry 以 `id`/`parentId` 组成追加式树，而不是简单线性聊天；支持分支、label、compaction、branch summary 与 custom entry。
+  - 直接 `tail` JSONL 只能看到**已持久化完成**的 entry，无法表现 token 级 streaming；Chat View 若要实时，必须同时接入 pi 的运行时事件。
+  - Pi Extension 暴露 `message_start/update/end`、tool execution、agent lifecycle、UI prompt、session switch/shutdown 等事件，非常适合新增一个只负责向本地 bridge 推送结构化事件的伴随扩展。
+  - Pi RPC mode 本身已是适合自定义 UI 的严格 JSONL 双向协议，支持 prompt/steer/follow-up/abort、消息和 entry 查询、session tree、工具流、extension UI 对话框等；但它通常由客户端**启动并拥有一个新的 pi 进程**，不等同于无侵入地接管 Herdr 中已经运行的交互式 pi。
+  - Pi SDK 更适合从应用内创建并拥有 agent runtime；它也不应在 MVP 中替代 Herdr 已有 pane/进程的所有权，否则会形成第二套会话运行时。
+  - 非交互 RPC 模式不会弹项目 trust UI；默认 `ask` 时会忽略未获信任的项目资源。未来若支持“由 GUI 新建 pi”，必须显式设计 trust 流程，不能偷传 `--approve`。
+  - Pi/extension 与 coding tools 具有宿主用户权限，没有内建沙箱；Web bridge 绝不能默认监听非 loopback，也不能把原始文件读取能力暴露为通用 API。
+
+### 当前技术判断（中间结论）
+
+1. **已有 Herdr pi pane 的原始视图可行性高**：官方已有 snapshot、事件和终端 observe/control 流。
+2. **已有交互式 pi 的结构化历史可行性高**：Herdr 的 `agent_session` 可给出 Pi session path，再使用 Pi 的 `SessionManager` 或兼容 parser 读取。
+3. **已有交互式 pi 的结构化实时流可行，但需要桥接扩展**：单靠 Herdr pane ANSI 或 tail JSONL 不足；推荐一个 Pi extension 将 runtime events 发送给本地应用。
+4. **Chat View 输入初期应继续交给现有 pane**：用 Herdr `agent.prompt`/受控终端输入，而不是同时用 Pi SDK/RPC 操作同一会话，避免双写和所有权冲突。
+5. **GUI 需要明确降级模式**：无 Pi extension 时仍显示完整原始终端，并用 session JSONL 显示“最终一致”的历史；只有 extension 在线时提供 token/tool 实时结构化显示。
+
+### 记录约定
+
+- 后续每次文档/代码写入、关键命令验证和来源核查均在此追加。
+- 不记录用户私人 agent 会话正文；实验只使用测试 session 或合成数据。
+
+### 16:00–16:35 — 竞品与相邻架构调研
+
+#### Moshi Desktop / `moshi-hook`
+
+本节依据 Moshi 官方 Chat View、Hooks、Gateway 与 Chat View 排障文档，属于一手公开资料核实；未审计闭源移动客户端实现。
+
+- `moshi-hook` 是运行在 agent 主机上的 companion daemon：管理 agent hook、接收本机 Unix socket 事件，并在 `127.0.0.1:24543` 提供 host gateway。移动应用通过既有 SSH 连接做本地端口转发，而不是让 gateway 监听公网。
+- Gateway 将低敏感度上下文流与高敏感度 transcript 流拆开：
+  - `/events` WebSocket 返回当前 terminal/multiplexer context、cwd、git、识别出的 agent/session 及 dev server；
+  - `/v1/transcripts` WebSocket 在 session identity 已确定后返回 `backlog`，随后按完成的 JSONL 行发送 `append`。
+- Chat View 的可用性链是三阶段：①识别当前 pane 的 agent；②通过 hook 把 pane 映射到该 agent 的准确 native session；③解析该 session 的 transcript path 并流式读取。官方明确拒绝用“最新修改 transcript”猜测 session，因为可能把另一段会话展示给用户。
+- Chat View 是同一 PTY/session 的视觉层，而非第二个 agent 或协议接管：历史来自本机 transcript，composer、stop、可安全映射的 approval/question action 回到原 multiplexer pane；不能安全映射的交互明确要求切回 terminal。
+- 其支持分层值得直接采用：Tier C 原始终端、Tier B agent-aware 状态、Tier A transcript-backed native chat。降级不是异常分支，而是产品能力模型。
+- 隐私边界清楚：完整 transcript、diff 和 source file 留在 host 与 app 的 SSH-forwarded 直连通道；Moshi 云端只承载受限通知摘要和控制元数据。Herzi MVP 不需要云端，因此可采用更严格的全本地边界。
+- Moshi 官方当前把 Pi 列为 Tier A，并允许 `/v1/transcripts?source=pi&session=...`；这证明“已有 multiplexer Pi + transcript Chat View”的产品路径已经有人实现，但其 Pi parser 和内部 wire schema未公开，不能直接视作可复用实现。
+
+关键来源（访问：2026-09-03）：
+
+- <https://getmoshi.app/docs/chat-view>
+- <https://getmoshi.app/docs/hooks>
+- <https://getmoshi.app/docs/debug-gateway>
+- <https://getmoshi.app/docs/debug-chat-view>
+
+#### Orca Chat UI
+
+本节依据 Orca 官方文档、公开仓库 `stablyai/orca` 的 `src/main/native-chat/` 源码与相关 issue/PR，属于一手公开资料核实。
+
+- Orca 的主要 Chat UI 同样是 terminal-backed：terminal 是 source of truth，Chat UI 是 transcript decoder + composer，并控制同一 PTY。
+- 公开支持集合以源码为准：`NATIVE_CHAT_SUPPORTED_AGENT_LIST` 当前包含 Claude/OpenClaude、Codex、Grok、OMP；Pi 虽可作为普通 CLI agent 运行并支持 session history/resume，但**不在 terminal-backed native transcript decoder 集合中**。
+- Orca 另有 runtime-owned structured Codex chat，只用于新建、本地、受支持平台的 Codex session；existing/remote/SSH session 仍走 terminal-backed Chat UI。这验证了应把“接管已有进程”和“应用拥有新 runtime”设计成两种模式，不能混为一谈。
+- `src/main/native-chat/` 的工程实现显示可靠 transcript tail 远比一次 `tail -f` 复杂：
+  - 优先使用 hook 报告的权威 `transcriptPath`，不存在时才按 agent/session ID 扫描；
+  - 初次可读取完整或窗口化历史，后续按 byte offset 增量读取；不解析未以换行结束的半条 JSONL；
+  - 对单条超大记录设置上限并跳过，以避免内存失控；批量 append 限制消息数；
+  - `fs.watch` 只做加速，定时 reconciliation 才负责正确性；监听父目录以容忍原文件替换；
+  - 检测 inode/identity、size、mtime 和边界 fingerprint，以识别 truncate、rotate、同尺寸重写；重写时 reset offset 并发 `replace` snapshot；
+  - 首次 flush 尚未发生、文件短暂消失或被替换都按可重试状态处理，而不是永久 `not found`；
+  - WSL/UNC I/O 单独做超时、并发 gate、abort、运行中 distro 探测和 backoff，避免挂死 Electron main process。
+- Orca 对远端曾出现“desktop Native Chat 错读 client-local transcript”的公开缺陷，进一步证明 transcript resolver 必须运行在 session 所在主机，而不是默认运行在 GUI 主机。
+- Orca 为 transcript 和 watcher 写了大量 unit/E2E race test（first flush、rotation、missed event reconciliation、unsubscribe race、WSL stall 等）；Herzi 实施计划应把这些场景纳入核心测试，而不是后补。
+- Orca 许可证已核实为 MIT；只能在遵守许可证与 attribution 的前提下参考或复用代码。当前报告仅提取设计模式，没有复制实现。
+
+关键来源（访问：2026-09-03）：
+
+- <https://www.onorca.dev/docs/agents/native-chat>
+- <https://raw.githubusercontent.com/stablyai/orca/main/src/shared/native-chat-agent-support.ts>
+- <https://raw.githubusercontent.com/stablyai/orca/main/src/main/native-chat/session-file-resolver.ts>
+- <https://raw.githubusercontent.com/stablyai/orca/main/src/main/native-chat/transcript-reader.ts>
+- <https://raw.githubusercontent.com/stablyai/orca/main/src/main/native-chat/transcript-incremental-reader.ts>
+- <https://raw.githubusercontent.com/stablyai/orca/main/src/main/native-chat/transcript-native-watcher.ts>
+- <https://raw.githubusercontent.com/stablyai/orca/main/src/main/native-chat/transcript-watch-engine.ts>
+- <https://github.com/stablyai/orca/issues/7404>
+- <https://raw.githubusercontent.com/stablyai/orca/main/LICENSE>
+
+#### Paseo 与 Webmux
+
+- Paseo 是 daemon-owned agent runtime：本地 Node daemon 创建和管理 agent 进程，通过统一 WebSocket timeline 向 Expo/Electron/CLI 客户端提供结构化事件；Pi adapter 使用本地 Pi RPC process。它适合未来的“由应用新建 session”，不适合 MVP 无侵入接管已在 Herdr pane 中运行的 Pi。
+- Paseo 可借鉴的部分是 protocol package、hello/capability negotiation、sequence/gap detection、authoritative catch-up、客户端 replica cache、背压与可选 E2EE relay；不应照搬其 agent ownership。
+- Webmux 是 Bun + tmux + xterm.js 的本地 Web dashboard，证明单机单端口浏览器终端、worktree/task 列表与移动简化 UI可快速交付。它主要拥有 tmux/worktree 生命周期，结构化 transcript 深度弱于 Moshi/Orca。
+- Webmux README/网站宣称 MIT，但截至本次核查仓库根目录没有 `LICENSE`，且存在对应公开 issue；因此在许可证澄清前不能复制其源代码，只能把公开行为当产品参考。
+
+关键来源（访问：2026-09-03）：
+
+- <https://raw.githubusercontent.com/getpaseo/paseo/main/docs/architecture.md>
+- <https://github.com/getpaseo/paseo/blob/main/docs/providers.md>
+- <https://raw.githubusercontent.com/getpaseo/paseo/main/LICENSE>
+- <https://raw.githubusercontent.com/windmill-labs/webmux/main/README.md>
+- <https://webmux.dev/docs/>
+- <https://github.com/windmill-labs/webmux/issues/297>
+
+### 16:35 — 竞品调研收敛结论
+
+1. Herzi 的 MVP 应采用 Moshi/Orca 已验证的 **terminal-backed Chat View**，而非另启 Pi SDK/RPC runtime。
+2. `pane → agent → exact session → transcript` 必须是显式身份链；无准确 session identity 时禁用 Chat View，不按 mtime 猜测。
+3. 原始 terminal 始终保留并可一键切回；结构化 parser 缺失、延迟、未知 entry 或 action 无法安全回送时都要降级，不得伪装为完整支持。
+4. transcript history 与 runtime live delta 是两条数据面：JSONL 负责权威持久历史，Pi companion extension 负责低延迟 token/tool/lifecycle；定期 JSONL reconciliation 修补 extension event 丢失。
+5. filesystem watcher 只能作为延迟优化，正确性依赖 byte offset、完整行边界、replace/resync、周期 reconciliation 及 sequence 去重。
+6. 单进程 MVP 也应保留 host-side adapter 边界。未来拆 daemon + desktop 或加 SSH host 时，Herdr socket、Pi transcript reader 和 Pi extension ingress 必须都迁到 agent 所在主机，浏览器/桌面端只消费 Herzi 协议。
+7. 许可核查：Herdr 与 Paseo 为 Apache-2.0，Orca 为 MIT；Moshi 客户端实现未公开；Webmux 缺少根许可证文件。优先自行实现协议适配，避免不必要的代码复制。
+
+### 本轮补充 — 上游源码复核与关键更正
+
+为了区分公开文档描述和真实实现，本轮只克隆了官方公开仓库到系统临时目录，没有把第三方源码复制进项目：
+
+- Herdr `herdrdev/herdr`，commit `94f6d9c0d9bb9cf9ffae99d8bbfb09e9bf2fc9e0`，Apache-2.0。
+- Orca `stablyai/orca`，commit `968dbd905faa1c34b6b9fe181c6392d698fea632`，MIT。
+
+复核结论：
+
+- Herdr `src/client/terminal_sessions.rs` 确认 terminal stream 的 wire 细节：`terminal.frame` 包含单调 `seq`、`encoding=ansi`、`width/height`、`full` 和 base64 `bytes`；control 输入含 `terminal.input/resize/scroll/release`。server 的绘制编码器只在首帧、强制重绘或尺寸变化发 full，其余发 diff。因此浏览器发现 sequence gap 时必须重开 observer 取得 full frame，不能继续盲写 diff。
+- 读取 Herdr **公开仓库中的** Pi integration 资产（不是私人 transcript）确认当前版本为 v8；它上报准确 session id/path 和状态，并处理 `session_start`、`agent_start`、`agent_settled` 等，但没有转发 message/tool delta。Herzi 应安装旁路 companion extension，不能编辑会被 Herdr 管理/覆盖的 `herdr-agent-state.ts`。
+- 再次执行只读 `herdr integration status`：本机 Pi 为 current v8。命令还显示其他 agent integration 状态，但这些不属于 Pi-only MVP。
+- Orca 当前源码支持的 Native Chat agent 列表不含 Pi；公开 issue #13185（2026-08-08）仍在请求 Pi Native Chat。此前“Orca 可作为 Pi Chat UI 成品参考”的表述需要收窄：它可作为 terminal-backed 架构、watcher 和失败案例参考，不能作为可直接复用的 Pi adapter。
+- Orca issue #13716 记录同一 transcript 被两个 live process 使用的 ownership 缺陷；#11761 记录交互问题状态传播缺口；#11511 记录 PTY 写入失败后乐观消息仍显示的问题。这些分别支持“禁止第二 runtime”“无法映射时回 Terminal”“发送状态需 unconfirmed”的决策。
+
+新增一手来源（访问：2026-09-03）：
+
+- <https://github.com/herdrdev/herdr/blob/master/src/client/terminal_sessions.rs>
+- <https://github.com/herdrdev/herdr/blob/master/src/integration/assets/pi/herdr-agent-state.ts>
+- <https://github.com/stablyai/orca/blob/main/src/shared/native-chat-agent-support.ts>
+- <https://github.com/stablyai/orca/issues/13185>
+- <https://github.com/stablyai/orca/issues/13716>
+- <https://github.com/stablyai/orca/issues/11761>
+- <https://github.com/stablyai/orca/issues/11511>
+
+### 本轮补充 — Pi session leaf 与只读副作用核查
+
+本轮完整检查本机 Pi 0.84.4 的公开 package 源码/类型及 extension 文档，没有打开任何真实 session 文件。
+
+- `SessionManager` 加载文件后默认把最后一个 entry 设为 `leafId`；每次追加 entry 又推进 leaf。
+- `/tree` 导航调用 branch 行为时，可以只改变进程内 `leafId` 而不立刻追加 entry。因此只读 JSONL watcher 在“导航后、下一次追加前”不能绝对知道活跃分支。
+- Pi 的 `session_tree` extension event 明确提供 `newLeafId/oldLeafId`，所以 companion extension 应把该事件作为活跃分支的运行时权威；无 extension 时 UI 必须标注最终一致限制。
+- `SessionManager.open()` 在旧版本 session 迁移时会 `_rewriteFile()`。即使其读取 API 很好用，把它直接用于旁观活跃 session 仍可能改变用户文件。Herzi MVP 决定实现隔离的只读 parser，并用 Pi fixtures 对齐 tree/compaction 语义。
+- `agent_end` 不是最终空闲：Pi 仍可能 retry、compact 或执行 queued follow-up；状态集成必须用 `agent_settled` 收口。
+
+### 本轮交付 — 形成报告、计划与 ADR
+
+- 新增 `docs/feasibility-and-architecture-report.md`：需求边界、事实基线、竞品比较、可行性、推荐架构、协议/组件、安全、一致性、演进路线、风险和来源。
+- 新增 `docs/implementation-plan.md`：M0–M6 里程碑、验收标准、测试矩阵、性能预算、诊断与文档工作流。
+- 新增 `docs/decisions/0001-terminal-backed-local-web-mvp.md`：正式记录 terminal-backed、单 runtime 所有权与本地单进程 Web MVP 决策。
+- 保留 `docs/herdr-api-schema.json` 作为 Herdr 0.8.2 / protocol 20 的版本化输入。
+- 根 `AGENTS.md` 已满足用户要求，无需重复或改写；更新 `docs/README.md` 索引状态。
+
+### 本轮验证
+
+- `find . -maxdepth 3 -type f` 确认项目过程文件只存在于根 `AGENTS.md` 和 `docs/`；尚无产品代码。
+- `jq empty docs/herdr-api-schema.json` 通过，基线 schema 是有效 JSON。
+- 检查报告、计划、ADR 的标题层级与索引路径；未发现待创建占位或误写文本。
+- 当时交付共 1,237 行 Markdown（含根 `AGENTS.md` 与既有日志，不含 JSON schema）；后续计划已按新的产品要求精简。
+
+### 产品要求调整 — 功能优先、精简测试
+
+用户指出原 M0–M6 计划防备性过强，过多异常测试和手写合成数据可能影响初期开发效率。经确认，这一判断适合当前从零验证产品价值的阶段，计划作如下调整：
+
+- 用 P0–P3 在约 8–15 个工程日内先完成真实 Herdr 连接、Terminal、Pi Chat history 和输入闭环。
+- 第一版以专用的真实 Herdr/Pi 开发 session 做手工验证，只给少量纯函数保留单元测试和一条端到端冒烟流程。
+- 删除首版的大规模合成 fixtures、watcher 竞态矩阵、跨版本矩阵、压力测试与 Windows/WSL 专项要求。
+- 大 transcript、完整 replace/reconcile、多浏览器控制权和复杂 Pi entry 改为真实使用遇到后处理。
+- 保留三个低成本底线：不创建第二个 Pi runtime、默认只监听 loopback、浏览器输入不拼接 shell。
+
+同时澄清 Pi 插件策略：
+
+- 第一版不需要新增 Herzi 插件；现有 Herdr Pi integration 已会上报 agent、状态和 exact session path，足以实现完成消息的 JSONL Chat View。
+- token/tool/current branch 的低延迟体验作为可选 P4，届时再安装独立 `herzi-bridge.ts`；不得修改 Herdr 管理的 integration 文件。
+
+第一版技术路线同步收敛为：Node.js 22 + TypeScript + Fastify + 单 WebSocket；React + Vite + Tailwind CSS + xterm.js；Pi JSONL 用 Node `fs` 只读并先做整文件刷新；pnpm 单 package。Web 版本稳定后如需桌面壳，优先 Electron 以复用 Node host，暂不引入 Tauri/Rust。
+
+### UI 参考图与组件生态调研
+
+用户明确要求参考 Moshi 截图中的两个主要交互：右上角 `Terminal / Chat` segmented control，以及左侧完整 Herdr Workspaces 导航。
+
+对截图的结构化观察：
+
+- 左侧是 workspace/session 树，选中项使用浅蓝背景，working/unread 使用小状态点；底部是 host/connection/settings。
+- 主区顶部展示 pane/session 标题和少量 metadata，模式切换固定在右上；Terminal 与 Chat 共用同一 pane。
+- Chat 不是大量社交气泡：assistant 是宽幅文档流，thinking 弱化，tool call 使用紧凑可折叠卡片，composer 固定在底部。
+- 右侧窄工具 rail 可用于未来文件/diff/context，但不属于 MVP。
+
+组件库查证结论：
+
+- shadcn/ui 的 Sidebar 已提供 group、submenu、active、badge、collapsible、rail 和 CSS variable theming，适合作为 Workspace 树与应用基础组件；源码进入项目，MIT。
+- assistant-ui 官方支持 Vite，并提供 External Store Runtime，明确允许应用自己持有 message/thread/persistence；其 Message primitives、Tool fallback/UI、Reasoning 和 Composer 可适配 Herzi 外部 Pi 数据，MIT。
+- AI Elements 的 Message/Tool/Reasoning/Prompt Input/IDE 示例非常接近目标视觉，且为 Apache-2.0；但官方前置条件偏 Next.js + AI SDK + React 19 + Tailwind 4，Tool 类型也绑定 AI SDK。因此不整体引入，只作为视觉/独立源码组件参考。
+- 主 Terminal 必须继续使用 xterm.js 6；AI Chat 库中的 Terminal output card 不能替代完整终端模拟器。
+- MUI/Ant Design 虽完整，但默认 Material/企业后台风格较强，定制到参考图成本更高。
+
+最终 UI 栈建议更新为 React 19 + Vite + Tailwind CSS 4 + shadcn/ui + assistant-ui External Store Runtime + xterm.js + lucide-react。新增 `docs/ui-research-and-direction.md` 保存完整分析、组件边界、页面结构、tool renderer 和一手来源。
+
+### assistant-ui 选型深化与同类方案比较
+
+进一步核对 assistant-ui External Store、Message、ToolFallback、Tool UI 与 runtime 文档：
+
+- External Store 支持自有 messages、converter、`isRunning`、`onNew/onCancel`，UI feature 按 callback/capability 开启，符合 Herzi 持有 Pi/Herdr 状态的前提。
+- ToolFallback 是现成可修改的 shadcn 组件，覆盖 args、result、error、cancel、approval 与 streaming lifecycle；可按 tool name 注册专用 renderer，并用 toolCallId 关联 result。
+- External Store 的 client tool invocation tracker 默认关闭。Herzi 必须保持关闭，只渲染 Pi 已执行的工具，避免浏览器重复执行。
+- assistant-ui 已发布 `@assistant-ui/react-pi`，但其 Node client 通过 Pi SDK 在进程内拥有 AgentSession/thread；这适合新建 Pi runtime，不适合 attach Herdr 已有进程。Herzi 仍选通用 `@assistant-ui/react` External Store。
+- 代价是需要 message converter，且上游 API 演进较快；应锁版本，并保留“半天真实接入不顺则退回自有 message list”的快速退出条件。
+
+同类方案对比补充：AI Elements 偏 Next/AI SDK；CopilotKit 偏 AG-UI/full-stack agent frontend；LlamaIndex Chat UI 示例偏 AI SDK `useChat`；Chatscope/NLUX 更偏通用 Chat/LLM adapter，缺少与 Herzi 同样合适的外部状态 + coding tool parts 组合。
+
+### 首个 Alpha 实施与本地协议复核
+
+2026-09-03 17:30–18:00 CST 开始按精简计划实现。完整变更、命令、验证与已知限制见 [`development-log.md`](./development-log.md)。本轮对前期调研作出以下实现级确认或修正：
+
+- 真实 `terminal.frame` 的 `encoding` 值为 `ansi`；帧的 `bytes` 字段仍是 base64 字符串。实现应无条件按协议解码 `bytes`，不能判断 `encoding === "base64"`。
+- 从真实 Pi JSONL 的字段形态确认首版需要处理 `session`、`model_change`、`thinking_level_change`、`message`；message role 包含 `user`、`assistant`、`toolResult`，content 包含 `text`、`thinking`、`toolCall`、`image`。检查脚本只输出字段名与类型，没有输出正文或 path。
+- tool result 是单独的 `toolResult` message，通过 `toolCallId` 与 assistant content 中的 toolCall 配对。服务端已在投影时完成合并。
+- `@assistant-ui/react` 本身导出 tool-call 数据模型、renderer slot、状态与 props，但不直接导出一套带视觉样式的 `ToolFallback` 成品；官方 starter/CLI 展示的是复制进项目后修改的 UI 源码。Herzi 因而保留 assistant-ui runtime/primitives，自行实现目标视觉的紧凑 tool card。
+- 使用 External Store Runtime 的真实类型检查通过，并保持 client tool invocation tracker 关闭。这验证了它可以在不创建第二个 Pi runtime 的前提下消费 Herzi 自有消息。
+- 为减少首版连接协议，资源快照与 Terminal 走 WebSocket，Chat History 暂时走带缓存的 1.5 秒 HTTP 轮询；后续 companion extension 出现时再统一增量消息。
+- 实现 Terminal control 前再次读取 Herdr 官方 `terminal_sessions.rs`：control CLI 从 stdin 接收 LF JSON，`terminal.input` 二选一接受 `text` 或 base64 `bytes`，`terminal.resize` 接受 `cols/rows`，`terminal.release` 映射 detach。Alpha 据此使用显式按钮申请、不自动 takeover，并在断线/切换时释放。来源：<https://github.com/herdrdev/herdr/blob/master/src/client/terminal_sessions.rs>（访问：2026-09-03）。
+
+### Terminal 交互方向调整
+
+用户实际试用后明确要求 Terminal 默认可输入，并指出控制切换器竞态、顶部 Term/Chat 控件拉伸和上下滚动未适配。当前产品结论取代早期“显式按钮申请”的交互设计：
+
+- Terminal View mount 后直接申请 control，UI 不再暴露启用/释放按钮；不使用 `--takeover`，失败时自动回退只读 observer。
+- wheel 必须走 Herdr `terminal.scroll`，不能只移动 xterm 本地 scrollback；输入、resize、scroll 都复用同一个 control child stdin。
+- header 使用 Flex 明确分配“可收缩标题 + 固定宽 segmented control”，避免隐藏 sidebar button 后的 Grid 自动放置改变列归属。
+
+### 21:20–21:45 — 连接、尺寸与多客户端焦点复核
+
+- 审计当前实现确认 Herzi 使用混合连接：`herdr status server --json` 发现 socket；资源快照和 agent 命令走 LF JSON raw socket；实时 Terminal 走 `herdr terminal session control|observe` CLI stream。
+- 当前 HerdrClient 尚未订阅 `events.subscribe`，而是每 1.5 秒轮询 `session.snapshot`；这是 Alpha 的简化，不应在说明中误写成已经增量订阅。
+- xterm.js `FitAddon` 把浏览器容器像素尺寸换算为 cols/rows；初始通过 `--cols/--rows`，后续 control resize 通过 stdin `terminal.resize` 传给 Herdr。server clamp 为 20–400 列、5–200 行。
+- readonly fallback 只在建立 observer 时传一次尺寸；之后 ResizeObserver 只 fit 本地 xterm，未重建 observer。这可能造成只读窗口 resize 后短暂尺寸不匹配，记录为现有缺口。
+- 本机 0.8.2 / protocol 20 schema 的 `SessionSnapshot` 只有单个 `focused_workspace_id`、`focused_tab_id`、`focused_pane_id`。Herdr 官方文档说明 persistent session 是 shared view，不是 tmux 式 per-client navigation；官方 discussion #651 的 stock Herdr 实测也确认 focus/API view/size 不是 per-client。
+- Herzi 没有调用 `pane.focus`：浏览器侧栏只更新本地 `selectedPaneId`，初始或选中 Pane 消失时才用 snapshot `focusedPaneId` fallback。Chat 和 Terminal 始终使用明确 Pane ID，因此不依赖 global focus。
+- Terminal focus 与 controller ownership 不是同一概念。多个 observer 可以共存，同一 terminal 只有一个 controller；当前 Herzi 默认申请且不传 `--takeover`，失败后回退只读。
+- 完整说明新增为 [`herdr-backend-connection-and-focus.md`](./herdr-backend-connection-and-focus.md)。
+- 变更和验证细节见 [`development-log.md`](./development-log.md)。
+
+### P4 实时 bridge 的本机 API 复核
+
+2026-09-03 继续对本机 Pi 0.84.4 安装包的 `docs/extensions.md`、`dist/core/extensions/types.d.ts`、`pi-ai/dist/types.d.ts` 和 `agent-session.js` 做只读核对：
+
+- `message_update` 提供累积的完整 assistant message，可直接投影为 assistant-ui external message；extension 不必自己拼 provider-specific delta。
+- `tool_execution_start/update/end` 提供稳定的 `toolCallId`、tool name、arguments、result 和 error，可与 JSONL toolCall 使用同一 id 合并。
+- `agent_end` 后仍可能 retry/compact；实时 idle 必须以 `agent_settled` 收口。阻塞式 extension UI 另有 `ui_prompt_start/end`。
+- `session_tree` 提供 `newLeafId`。它补足了 JSONL append-only 文件无法表达纯内存 leaf 导航的缺口。
+- Pi 源码注释和调用顺序确认 `message_end` 先于 session persistence；实现因此在消息结束后上报“恢复跟随最新 entry”，而不是猜测新 leaf id。
+- 本机 Herdr integration 源码确认 Pane id 由 `HERDR_PANE_ID` 注入，session path 来自 `getSessionFile()`；Herzi bridge 复用同一事实来源但保持为独立 package。
+
+这些结论已落实到 [`pi-realtime-bridge.md`](./pi-realtime-bridge.md) 与 P4 代码。没有打开或记录真实 session 正文。
+
+### Codex activity UI 参考核对
+
+- 用户提供的 Codex macOS 截图显示：完成 turn 用 `Worked for …` 作为 activity 总摘要；关闭时隐藏工具/思考列表，展开时显示多条轻量 action；运行态在底部持续显示动态指示。
+- 检索 OpenAI 官方 Codex/Developer 文档，没有找到客户端折叠阈值、摘要命名或 `Worked for` 私有判断算法的公开说明。
+- OpenAI Responses API 公开 schema 确认 response 有 `created_at`、完成后有 `completed_at`，并保持 output item 顺序。它只用于验证时间与有序 item 的通用数据模型，不作为 Codex UI 私有算法的证据。来源：<https://developers.openai.com/api/reference/cli/resources/responses/methods/create>（访问：2026-09-03）。
+- 产品决策：基于截图实现可解释的本地规则——user→assistant turn 边界、最后 text/image 为最终输出边界、此前全部 assistant parts 默认折叠、相邻 tools 分组；普通过程消息在展开区完整渲染，只有 thinking/tool 摘要做本地单行截断，不新增模型调用。
+- 详细规则、实现与真实只读验证见 [`chat-activity-ui.md`](./chat-activity-ui.md)。
+## 2026-09-04：Herdr `done` / seen 语义复核
+
+- 用户描述的 `down` 实际对应 Herdr AgentStatus 的 `done`。本项目归档的 protocol 20 schema 正式枚举仍为 `idle / working / blocked / done / unknown`，不存在 Agent `down`。
+- Herdr 官方 CLI reference 与 Agent automation 文档一致说明：`done` 是已完成但所在 Tab 尚未被查看，`idle` 是 ready 且已 seen；聚焦 Tab 或以 `pane.focus / agent.focus` 定位目标会标记 seen，CLI read 不会。
+- protocol 20 暴露 `agent.focus` 和 `pane.focus`，没有独立的 acknowledge/mark-seen 请求。因此 Herzi 如需遵循原生已读语义，必须接受 session-global focus 同步变化这一副作用。
+- 官方状态视觉语义为 `blocked` 红、`working` 黄、`done` 蓝、`idle` 绿；Herzi 为降低侧栏噪声按用户要求隐藏 idle、unknown 和未识别状态，只保留前三种关注态，并为本地兼容的 waiting/error/down 分色。
+- 一手来源（访问日期 2026-09-04）：[Herdr CLI reference](https://herdr.dev/docs/cli-reference/)、[Agent automation](https://herdr.dev/docs/agent-automation/)、[Concepts](https://herdr.dev/docs/concepts/) 与 [`herdr-api-schema.json`](./herdr-api-schema.json)。
+- 当前线程不在 Herdr 环境中，未使用 CLI 或 socket 操作真实会话；实现判断来自官方资料、skill 与版本化 schema。
