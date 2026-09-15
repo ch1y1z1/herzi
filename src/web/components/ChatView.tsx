@@ -25,8 +25,8 @@ import {
   Wrench,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import remarkGfm from "remark-gfm";
 
+import { markdownShared } from "../markdownPlugins";
 import type {
   ChatJsonObject,
   ChatMessage,
@@ -380,12 +380,7 @@ function UserText() {
 }
 
 function AssistantText() {
-  return (
-    <MarkdownTextPrimitive
-      className="markdown-body"
-      remarkPlugins={[remarkGfm]}
-    />
-  );
+  return <MarkdownTextPrimitive className="markdown-body" {...markdownShared} />;
 }
 
 function ReasoningPart({ text }: { text: string }) {
@@ -523,8 +518,8 @@ function ActivityItemRow({ item }: { item: ActivityItem }) {
         <TextMessagePartProvider text={item.text}>
           <MarkdownTextPrimitive
             className="markdown-body"
-            remarkPlugins={[remarkGfm]}
             smooth={false}
+            {...markdownShared}
           />
         </TextMessagePartProvider>
       </div>

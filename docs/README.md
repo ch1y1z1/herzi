@@ -14,6 +14,7 @@
 | [`sidebar-context-menu.md`](./sidebar-context-menu.md) | 已实现 | Workspace/Tab 右键菜单、Herdr mutation 映射、路径复制和验证边界 |
 | [`chat-activity-ui.md`](./chat-activity-ui.md) | 已实现 | `Worked for` 全过程折叠、thinking/tool 摘要、连续工具分组与运行状态规则 |
 | [`pi-realtime-bridge.md`](./pi-realtime-bridge.md) | 代码完成、待安装验收 | Pi companion extension、实时协议、安装方式、降级与限制 |
+| [`latex-rendering-fix.md`](./latex-rendering-fix.md) | 已实施 | Chat 中 LaTeX 公式无法渲染的根因定位、修复方案与验证记录 |
 | [`development-log.md`](./development-log.md) | 持续维护 | 实际代码变更、运行方法、真实冒烟结果、已知限制与后续工作 |
 | [`decisions/0001-terminal-backed-local-web-mvp.md`](./decisions/0001-terminal-backed-local-web-mvp.md) | Accepted | terminal-backed、单 runtime 所有权与本地 Web MVP 架构决策 |
 | [`research-log.md`](./research-log.md) | 持续维护 | 调研与验证过程流水账、版本、来源、更正和受限项 |
@@ -42,6 +43,7 @@
 - 2026-09-04 侧栏状态点改为仅显示需关注状态：Herdr 原生 `working / blocked / done` 分别为黄、红、蓝，`idle / unknown / 默认态` 不显示；Chat 成功载入 `done` Agent 后通过官方 `agent.focus` 标记 seen 并收敛到 `idle`。详见 [`development-log.md`](./development-log.md)。
 - 2026-09-04 已增加侧栏右键菜单：Workspace 支持新建 Tab、重命名、复制路径、关闭，Pane 行支持对所属 Tab 重命名、复制路径、关闭；按用户更正不包含 `copy tab`。详见 [`sidebar-context-menu.md`](./sidebar-context-menu.md)。
 - 2026-09-05 已按用户授权初始化 Git，并创建 GitHub public repository [`ch1y1z1/herzi`](https://github.com/ch1y1z1/herzi)；发布前敏感信息扫描与完整构建均通过，详情见 [`development-log.md`](./development-log.md)。
+- 2026-09-14 Chat 已支持渲染 LaTeX 公式：新增 remark-math/rehype-katex 与定界符预处理（`\( \)`/`\[ \]` → `$` 形式），正文与 activity 折叠区共用同一配置；详见 [`latex-rendering-fix.md`](./latex-rendering-fix.md)。
 
 ## 记录原则
 

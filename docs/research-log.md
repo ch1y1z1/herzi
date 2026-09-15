@@ -305,3 +305,50 @@
 - 官方状态视觉语义为 `blocked` 红、`working` 黄、`done` 蓝、`idle` 绿；Herzi 为降低侧栏噪声按用户要求隐藏 idle、unknown 和未识别状态，只保留前三种关注态，并为本地兼容的 waiting/error/down 分色。
 - 一手来源（访问日期 2026-09-04）：[Herdr CLI reference](https://herdr.dev/docs/cli-reference/)、[Agent automation](https://herdr.dev/docs/agent-automation/)、[Concepts](https://herdr.dev/docs/concepts/) 与 [`herdr-api-schema.json`](./herdr-api-schema.json)。
 - 当前线程不在 Herdr 环境中，未使用 CLI 或 socket 操作真实会话；实现判断来自官方资料、skill 与版本化 schema。
+
+## 2026-09-14：Herdr 侧边栏隐藏配置核查（只读）
+
+用户要求检查本机 herdr 配置，并联网调研"侧边栏不显示"的配置方法；本次明确不做任何改动。
+
+### 本机现状（只读检查）
+
+- 二进制 `~/.local/bin/herdr`，版本 0.8.2（stable 通道），client/server protocol 20 兼容，`herdr config check` 通过。
+- 配置文件位于 `~/.config/herdr/config.toml`（mtime 2026-09-14 16:07），当前内容：
+  - `onboarding = false`
+  - `[ui] sidebar_start_collapsed = true`（启动即折叠侧边栏）
+  - `[ui] sidebar_collapsed_mode = "compact"`（折叠时仍保留窄条状态栏）
+  - `[terminal] default_shell = "/opt/homebrew/bin/fish"`
+- 即当前已是"启动折叠"，但折叠模式为 `compact`，侧边栏并未完全消失。
+
+### 联网调研结论（官方 stable 0.9.0 文档）
+
+- Config reference 确认两个键（来源：<https://herdr.dev/docs/config-reference/>，版本化源 <https://raw.githubusercontent.com/herdrdev/herdr/v0.9.0/docs/next/website/src/data/config-reference.json>，访问 2026-09-14）：
+  - `ui.sidebar_start_collapsed`（boolean，默认 false）："Start Herdr with the sidebar collapsed. Changes take effect on the next launch."（下次启动生效）
+  - `ui.sidebar_collapsed_mode`（enum `compact | hidden`，默认 `compact`）：`compact` 保留窄条状态栏，`hidden` 为零宽度、完全隐藏，可用 `toggle_sidebar`（默认 `prefix+b`）重新打开。
+- Configuration 文档 "UI and sidebar" 章节指向 Config reference；并说明 sidebar 等呈现类设置属于 client 本地配置，`herdr server reload-config` 可热加载大部分 UI 设置，启动类设置仍需重启（来源：<https://herdr.dev/docs/configuration/>，访问 2026-09-14）。
+- `hidden` 模式的需求出处：GitHub Discussion #842 "Option to fully hide the collapsed sidebar"（<https://github.com/herdrdev/herdr/discussions/842>）；`sidebar_start_collapsed` 的需求出处为 Discussion #848。两个键在本机 0.8.2 的 `herdr --default-config` 输出中均已存在，无需升级即可使用。
+
+### 结论（未执行）
+
+要把侧边栏完全不显示，只需把 `sidebar_collapsed_mode` 由 `"compact"` 改为 `"hidden"`（当前配置已是 collapsed 启动，`sidebar_start_collapsed` 无需再动）；修改后可 `herdr server reload-config` 或重启会话生效。本次遵照用户要求未做任何改动。
+
+## 2026-09-14：追查 `~/.config/herdr/config.toml` 16:07 变更来源
+
+用户询问当天 16:07 是谁修改了 herdr 配置文件。经只读取证，结论如下。
+
+### 结论
+
+- **直接修改者：moshi-hook 0.3.22（Moshi 桥接守护进程）**。当天 16:04 用户 `brew upgrade moshi-hook`（0.3.10→0.3.22，fish 历史可查），16:05:15 新版守护进程启动。16:07:05.962 用户从 Moshi 客户端 attach herdr（hook.log 记录 `gateway pty: client attached pid=57975`），触发其内嵌脚本：用 perl 原地改写 `config.toml` 中的 `sidebar_collapsed_mode`（此次写入 `"compact"`）→ `herdr server reload-config`（服务端日志 16:07:06.228）→ exec attach。
+- **16:07:06 的"创建时间"是假象**：moshi-hook 的 perl 以临时文件+rename 方式写回（`-pi`），会重置 APFS birth 时间（已用 /tmp 实验验证；对照：本会话 16:19:45 用编辑工具原地修改后 birth 保持 16:07:06 不变）。文件本体及其中的中文注释在 16:07 之前就已存在（原始作者无法从现有日志确定，早于本次追查窗口）。
+- 关键佐证：moshi-hook 二进制内嵌脚本头注释 *"Set the shared collapsed rail presentation, reload, then attach"*、*"Keep other sections, comments and permissions intact"*——解释了为何中文注释、644 权限、其余内容全部保留；脚本只管 `sidebar_collapsed_mode` 一个键（不含 `sidebar_start_collapsed`/`onboarding`/`default_shell`，二进制中也无中文）。
+- 排除项：本 pi 会话 16:07:25 才启动（晚于文件变更 19 秒，pid 58794）；16:07:06 时无任何其他 coding agent 在运行（今日 pi 会话最早 16:07:25，claude/codex 无当日会话记录）；herdr 二进制无中文文本；VS Code/Cursor/Windsurf 本地历史无此文件；fish 历史无手动编辑命令。
+- **影响与提醒**：moshi-hook 在每次从 Moshi 端 attach herdr 时都会执行该脚本，把 `sidebar_collapsed_mode` 设为 Moshi 应用侧当前偏好（当日三次 attach 对应 16:05:50 / 16:06:36 / 16:07:06 三次 reload_config）。因此本会话 16:19:45 手动改成的 `"hidden"`，下次从 Moshi 连接 herdr 时可能被改回 `"compact"`；如需稳定保持完全隐藏，应在 Moshi 应用内的对应设置（hide sidebar）里切换，而不是只改本地 config.toml。
+
+### 证据来源
+
+- fish 历史（~/.local/share/fish/fish_history，带时间戳）
+- herdr 服务端日志 ~/.config/herdr/herdr-server.log（reload_config / client connected / agent changed）
+- herdr 客户端日志（pid 57975 启动时间）
+- Moshi 守护日志 hook.log 与 /opt/homebrew/var/log/moshi-hook.log（pty attach/detach、daemon 启动、hooks 更新）
+- moshi-hook 0.3.22 二进制 strings 提取的内嵌 bash+perl 脚本；brew 缓存 9 月 13 日旧版 tar.gz 对照（旧版无该功能）
+- APFS birth 时间实验（perl -pi 重置 birth；编辑工具原地写不重置）

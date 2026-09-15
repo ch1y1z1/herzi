@@ -488,3 +488,37 @@ npm start
 - `origin` 使用现有 GitHub SSH 凭据配置为 `git@github.com:ch1y1z1/herzi.git`。
 - 首个 root commit 为 `44ba0ea`（`feat: initialize Herzi web client`），已通过 SSH 成功推送到 `origin/main` 并建立 upstream tracking。
 - GitHub API 复核确认仓库可见性为 `PUBLIC`，默认分支为 `main`；本记录随后作为独立 docs commit 推送。
+
+## 2026-09-14：Herdr 折叠侧边栏改为完全隐藏
+
+- 应用户要求，将 `~/.config/herdr/config.toml` 中 `sidebar_collapsed_mode` 由 `"compact"` 改为 `"hidden"`（折叠时零宽度、完全隐藏，`prefix+b` 可重新展开）；`sidebar_start_collapsed = true` 保持不变。
+- 改动依据上一节调研结论（Config reference：`ui.sidebar_collapsed_mode` enum `compact|hidden`）。
+- 验证：`herdr config check` → `config: ok`；`herdr server reload-config` 返回 `status: applied`、diagnostics 为空，配置已热加载生效。
+
+## 2026-09-14：修复 Chat 中 LaTeX 公式无法渲染
+
+### 根因与方案
+
+- 根因定位与完整方案见 [`latex-rendering-fix.md`](./latex-rendering-fix.md)：Chat 的 `MarkdownTextPrimitive` 只有 `remark-gfm`，无 remark-math/rehype-katex，且缺少 `\( \)`/`\[ \]` 到 `$` 定界符的预处理。
+- 服务端 `pi-session-reader.ts` 原样透传文本，无需改动。
+
+### 代码变更
+
+- 新增依赖：`remark-math@^6.0.0`、`rehype-katex@^7.0.1`（自动引入 `katex@0.16.47`）。
+- 新增 `src/web/markdownPlugins.ts`：导出 `markdownShared`（`remarkPlugins: [remarkGfm, remarkMath]`、`rehypePlugins: [rehypeKatex]`、`preprocess: escapeCurrencyDollars(normalizeMathDelimiters(text))`），供 Chat 正文与 activity 内嵌文本两处复用。
+- `src/web/components/ChatView.tsx`：`AssistantText()` 与 `ActivityItemRow()` 内嵌文本两处 `MarkdownTextPrimitive` 改用 `{...markdownShared}`；移除已无引用的 `remarkGfm` import。
+- `src/web/main.tsx`：引入 `katex/dist/katex.min.css`。
+- 实施调整：方案初稿的 `as const` 会使插件数组变为 readonly、与 react-markdown `Pluggable[]` 类型冲突（TS2322），已移除，语义不变。
+
+### 验证
+
+- `npm run build`（typecheck + server + web）通过；KaTeX 字体随 CSS 打包进 `dist/web/assets/`，无新增告警类型。
+- 本地 Node 中以与前端一致的管线（normalize → escape → remark-math → rehype-katex）验证 6 个用例：display `$$`、单 `$` 行内、`\(\)`、`\[\]` 均产出 KaTeX 节点；`$5 and $7` 保持纯文本（价格守卫生效）；`$5x = 10$` 保留为公式。详见 [`latex-rendering-fix.md`](./latex-rendering-fix.md) 第 6 节。
+- 浏览器端用 cua-driver 隔离 Chrome 实测：GFM 表格单元格内公式（希腊字母、上标、lim+分数）KaTeX 排版渲染正确，价格守卫在真实页面生效，KaTeX CSS/字体加载正常；第一～四组因会话仍在流式输出、吸底滚动不断重置视口，未截到独立帧，留待会话静止后目测（详见 latex-rendering-fix.md 第 7 节）。
+- `Worked for` 折叠区内的 message item 与正文共用同一 `markdownShared` 配置（代码路径一致），未单独目测。
+
+### 已知边界
+
+- 单 `$` 行内公式开启后，裸价格依赖 `escapeCurrencyDollars` 启发式保护，极端格式仍可能误判。
+- 跨行 `\(...\)` 不被归一化（模型极少输出），会原样显示为文本。
+- streaming 中未闭合的公式会短暂显示原始源码，闭合后自动恢复。
