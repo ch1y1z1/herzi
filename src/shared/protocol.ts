@@ -59,10 +59,29 @@ export interface TerminalFrame {
   bytes: string;
 }
 
+export interface ChatToolResultImage {
+  image: string;
+  mimeType: string;
+  sha256: string;
+}
+
+export interface ChatToolResultPayload {
+  type: "herzi-tool-result";
+  value: unknown;
+  images: ChatToolResultImage[];
+}
+
 export type ChatPart =
   | { type: "text"; text: string }
   | { type: "reasoning"; text: string }
-  | { type: "image"; image: string }
+  | {
+      type: "image";
+      image: string;
+      name?: string;
+      mimeType?: string;
+      uploadId?: string;
+      sha256?: string;
+    }
   | {
       type: "tool-call";
       toolCallId: string;
@@ -108,6 +127,60 @@ export interface ChatSnapshot {
 
 export type ChatRealtimeStatus = "idle" | "working" | "waiting";
 
+export interface PiBridgeCapabilities {
+  commands: boolean;
+  imageInput: boolean;
+  modelAcceptsImages: boolean | null;
+}
+
+export type ImageInputCapability =
+  | { mode: "none"; reason: string }
+  | { mode: "host-path"; reason?: string }
+  | { mode: "pi-native"; modelAcceptsImages: boolean | null };
+
+export interface ImageUploadResponse {
+  uploadId: string;
+  name: string;
+  mimeType: string;
+  size: number;
+  sha256: string;
+  expiresAt: number;
+}
+
+export type PromptDeliveryStatus =
+  | "submitted"
+  | "queued"
+  | "claimed"
+  | "dispatched"
+  | "observed-live"
+  | "persisted"
+  | "delivery-unconfirmed"
+  | "failed";
+
+export interface PromptResponse {
+  ok: true;
+  requestId: string;
+  transport: "text" | "host-path" | "pi-native";
+  status: PromptDeliveryStatus;
+}
+
+export interface PiBridgeCommandImage {
+  uploadId: string;
+  name: string;
+  mimeType: string;
+  size: number;
+  sha256: string;
+}
+
+export interface PiBridgeCommand {
+  id: string;
+  requestId: string;
+  type: "user-message";
+  text: string;
+  images: PiBridgeCommandImage[];
+  delivery: "immediate-or-steer";
+}
+
 export interface ChatRealtimeTool {
   toolCallId: string;
   toolName: string;
@@ -119,6 +192,7 @@ export interface ChatRealtimeTool {
 
 export type ChatRealtimeEvent =
   | { type: "session" }
+  | { type: "capabilities"; capabilities: PiBridgeCapabilities }
   | { type: "status"; status: ChatRealtimeStatus }
   | { type: "message"; message: ChatMessage }
   | { type: "tool"; tool: ChatRealtimeTool }
@@ -136,6 +210,7 @@ export interface ChatRealtimeState {
   /** Undefined means follow the last JSONL entry; null means the branch root. */
   branchLeafId?: string | null;
   branchRevision: number;
+  capabilities?: PiBridgeCapabilities;
   messages: ChatMessage[];
   tools: ChatRealtimeTool[];
   updatedAt: number;

@@ -352,3 +352,56 @@
 - Moshi 守护日志 hook.log 与 /opt/homebrew/var/log/moshi-hook.log（pty attach/detach、daemon 启动、hooks 更新）
 - moshi-hook 0.3.22 二进制 strings 提取的内嵌 bash+perl 脚本；brew 缓存 9 月 13 日旧版 tar.gz 对照（旧版无该功能）
 - APFS birth 时间实验（perl -pi 重置 birth；编辑工具原地写不重置）
+
+## 2026-09-15：Chat 图片粘贴方案调研
+
+### 当前项目审计
+
+- 当前 Git 基线为 `a2a2d17`，工作树在调研开始时 clean；本轮没有读取真实 Pane、Pi transcript 或用户图片。
+- `src/server/pi-session-reader.ts` 和 shared `ChatPart` 已支持展示 Pi JSONL 中的 image content；缺口主要在输入侧。
+- `ChatView` 的 assistant-ui External Store 没有 attachment adapter，`ComposerPrimitive.Input` 因 capability=false 不会接收 clipboard file；`onNew` 和 optimistic reconciliation 也都只处理文本。
+- Herdr protocol 20 的 `agent.prompt` 只有文本字段；现有 prompt HTTP API 同样只有 `{text}`。
+- companion bridge 当前只有 Pi 到 Herzi 的 event POST，并把 live image 暂时转换为 `[image]`，没有向同一 Pi runtime 下发结构化 user message 的能力。
+
+### 一手资料结论
+
+- Moshi 的 Image and file paste 文档确认其把手机图片/文件通过 SCP 写到 agent 主机的 `~/.moshi/uploads/`，再把宿主路径附到 Chat composer 或插入 Terminal。这是 terminal-backed 模式的可靠 fallback。
+- Moshi Chat View 文档确认 Pi 属于 Tier A，Chat composer 可 attach image，且 prompt 仍进入同一个 multiplexer session；其闭源内部 Pi 图片 wire format未公开，本轮没有推断。
+- Orca Native Chat 文档确认 updated structured Codex chat 支持 clipboard 图片、发送前缩略图/移除/大图预览和 draft 重连恢复；terminal-backed Chat 只在 host capability 支持时提供 attachment。当前 `main` 的 terminal-backed transcript agent 列表不含 Pi，因此 Orca 只作为 UX/生命周期参考。
+- Pi 0.84.4 README 和本机 interactive-mode 源码确认 Ctrl+V 会读取宿主剪贴板、写入 `os.tmpdir()/pi-clipboard-<uuid>`，再把路径插入 editor；Pi `read` tool 会把该路径中的图片作为 tool result image 交给视觉模型。
+- Pi 0.84.4 extension API 的 `pi.sendUserMessage()` 可以向现有 runtime 发送 text + image，并正式进入 session。该版本 `session-format.md`、`pi-ai/dist/types.d.ts` 和 runtime 实现都使用 `{type:"image", data, mimeType}`；`extensions.md` 一处示例使用 `source`，与同版本实现不一致，后续必须按安装类型编译并做真实冒烟。
+- assistant-ui 0.15.17 的 `ComposerPrimitive.Input` 已内建 clipboard file 处理；只需给 External Store 配置 `adapters.attachments`，并渲染 attachment primitives。attachment send 失败会恢复 draft，适合复用。
+
+### 技术决策
+
+- 推荐采用“Pi bridge 原生 image content 为主、Moshi/Pi 式宿主文件路径为 fallback”的双通道，不创建第二 runtime。
+- 前端使用 assistant-ui attachment adapter；服务端使用 multipart + opaque uploadId + 受管 UploadStore；bridge v2 通过 heartbeat/capability + long poll command 调用 `pi.sendUserMessage()`。
+- 旧 bridge/无 bridge 通过现有 Herdr `agent.prompt` 发送用户文本和受管路径，并用同 Pane/session ledger 恢复 Chat 中的附件显示。
+- 禁止 base64 文本 prompt、修改系统剪贴板、直接写 Pi JSONL和另起 Pi RPC/SDK。
+- multipart 引入跨站提交面，Origin/Host/CSRF guard 是实施前置；图片、base64、正文与绝对路径不得进入普通日志。
+
+### 交付
+
+- 新增 [`image-paste-implementation-plan.md`](./image-paste-implementation-plan.md)，包含范围、现状、竞品、方案对比、端到端架构、API、状态机、安全、测试、文件清单、排期、验收与风险。
+- 更新 [`README.md`](./README.md) 文档索引和当前结论。
+- 本轮只形成研究和方案，未修改产品代码、未安装或 reload Pi extension、未执行写入式 prompt。
+
+来源（访问日期 2026-09-15）：
+
+- <https://getmoshi.app/docs/chat-view>
+- <https://getmoshi.app/docs/image-paste>
+- <https://getmoshi.app/docs/hooks>
+- <https://www.onorca.dev/docs/agents/native-chat>
+- <https://github.com/stablyai/orca/blob/main/src/shared/native-chat-agent-support.ts>
+- <https://github.com/earendil-works/pi-mono/tree/main/packages/coding-agent>
+- <https://www.assistant-ui.com/docs/ui/Attachment>
+
+## 2026-09-15：Chat 图片粘贴首轮实施复核
+
+- 实施采用既定双通道，没有改变单 runtime 决策：bridge v2 用 Pi extension API 直接发送 image content，离线时用受管 host path + Herdr text prompt。
+- 本机 Pi 0.84.4 TypeScript 编译再次确认 extension image shape 为 `{type:"image", data, mimeType}`，没有采用同版本文档中不一致的 `source` 示例。
+- assistant-ui 真实 primitive 的 jsdom 测试确认：`ComposerPrimitive.Input` paste file 后调用 attachment adapter；点击 send 后先上传，再把 complete attachment 交给 `onNew`。
+- server 实施后补充了最初方案中的像素边界：PNG/JPEG/GIF/WebP 读取尺寸，拒绝超过 40MP 或任一边超过 16384 的图片；未知/无法解析尺寸同样拒绝。
+- bridge command long poll 增加 abort 释放，避免旧 runtime 断开后 waiter 抢先 claim 新命令导致图片消息丢失。
+- 为避免 server 尚未重启时新 hashed Web bundle立刻破坏既有 mutation，前端 token helper 对旧 server 的 `/api/request-token` 404 临时回退旧行为；新 server仍强制 token。
+- 完整实现和验证记录见 [`development-log.md`](./development-log.md) 与 [`image-paste-implementation-plan.md`](./image-paste-implementation-plan.md) 第 22 节。

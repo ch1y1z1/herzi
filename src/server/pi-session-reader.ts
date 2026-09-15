@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
 
 import type {
@@ -5,7 +6,9 @@ import type {
   ChatMessage,
   ChatPart,
   ChatSnapshot,
+  ChatToolResultPayload,
 } from "../shared/protocol.js";
+import { extractManagedAttachments } from "./managed-attachments.js";
 
 interface PiEntry {
   id: string;
@@ -37,14 +40,27 @@ type PiContent =
     }
   | Record<string, unknown>;
 
+const imageHashes = new WeakMap<object, string>();
+
 interface CacheEntry {
   mtimeMs: number;
   size: number;
   entries: PiEntry[];
 }
 
+type ManagedAttachmentResolver = (
+  uploadId: string,
+  paneId: string,
+  sessionPath: string,
+) => Promise<
+  | { image: string; name: string; mimeType: string; sha256: string }
+  | null
+>;
+
 export class PiSessionReader {
   private cache = new Map<string, CacheEntry>();
+
+  constructor(private readonly resolveManagedAttachment?: ManagedAttachmentResolver) {}
 
   async read(
     paneId: string,
@@ -66,11 +82,19 @@ export class PiSessionReader {
       this.cache.set(sessionPath, cached);
     }
 
+    const messages = convertActiveBranch(cached.entries, branchLeafId);
     return {
       paneId,
       running,
       updatedAt: cached.mtimeMs,
-      messages: convertActiveBranch(cached.entries, branchLeafId),
+      messages: this.resolveManagedAttachment
+        ? await hydrateManagedAttachments(
+            messages,
+            paneId,
+            sessionPath,
+            this.resolveManagedAttachment,
+          )
+        : messages,
     };
   }
 }
@@ -184,7 +208,14 @@ function convertContent(
       typeof part.data === "string" &&
       typeof part.mimeType === "string"
     ) {
-      return [{ type: "image", image: `data:${part.mimeType};base64,${part.data}` }];
+      return [
+        {
+          type: "image",
+          image: `data:${part.mimeType};base64,${part.data}`,
+          mimeType: part.mimeType,
+          sha256: imageSha256(part, part.data),
+        },
+      ];
     }
     if (
       part.type === "toolCall" &&
@@ -211,19 +242,91 @@ function convertContent(
   });
 }
 
+async function hydrateManagedAttachments(
+  messages: ChatMessage[],
+  paneId: string,
+  sessionPath: string,
+  resolveAttachment: ManagedAttachmentResolver,
+): Promise<ChatMessage[]> {
+  return Promise.all(
+    messages.map(async (message) => {
+      if (message.role !== "user") return message;
+
+      const content: ChatPart[] = [];
+      for (const part of message.content) {
+        if (part.type !== "text") {
+          content.push(part);
+          continue;
+        }
+
+        const extracted = extractManagedAttachments(part.text);
+        if (extracted.text) content.push({ type: "text", text: extracted.text });
+        for (const uploadId of extracted.uploadIds) {
+          const resolved = await resolveAttachment(uploadId, paneId, sessionPath);
+          if (resolved) {
+            content.push({
+              type: "image",
+              image: resolved.image,
+              name: resolved.name,
+              mimeType: resolved.mimeType,
+              uploadId,
+              sha256: resolved.sha256,
+            });
+          } else {
+            content.push({
+              type: "text",
+              text: `[Image attachment unavailable: ${uploadId}]`,
+            });
+          }
+        }
+      }
+      return { ...message, content };
+    }),
+  );
+}
+
+function imageSha256(part: object, data: string): string {
+  const cached = imageHashes.get(part);
+  if (cached) return cached;
+  const hash = createHash("sha256").update(data, "base64").digest("hex");
+  imageHashes.set(part, hash);
+  return hash;
+}
+
 function toolResultValue(value: PiMessage["content"]): unknown {
   if (typeof value === "string") return value;
   if (!Array.isArray(value)) return null;
-  const values = value.flatMap((part) => {
+
+  const textValues: string[] = [];
+  const images: ChatToolResultPayload["images"] = [];
+  for (const part of value) {
     if (part.type === "text" && "text" in part && typeof part.text === "string") {
-      return [part.text];
+      textValues.push(part.text);
+      continue;
     }
-    if (part.type === "image" && "mimeType" in part) {
-      return [`[image: ${String(part.mimeType)}]`];
+    if (
+      part.type === "image" &&
+      "data" in part &&
+      "mimeType" in part &&
+      typeof part.data === "string" &&
+      typeof part.mimeType === "string"
+    ) {
+      images.push({
+        image: `data:${part.mimeType};base64,${part.data}`,
+        mimeType: part.mimeType,
+        sha256: imageSha256(part, part.data),
+      });
     }
-    return [];
-  });
-  return values.length <= 1 ? (values[0] ?? "") : values;
+  }
+
+  const textResult =
+    textValues.length <= 1 ? (textValues[0] ?? "") : textValues;
+  if (images.length === 0) return textResult;
+  return {
+    type: "herzi-tool-result",
+    value: textResult,
+    images,
+  } satisfies ChatToolResultPayload;
 }
 
 function statusFromStopReason(stopReason?: string): ChatMessage["status"] {

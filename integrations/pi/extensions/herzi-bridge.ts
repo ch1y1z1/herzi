@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 type JsonObject = Record<string, unknown>;
 
@@ -31,6 +31,14 @@ interface ChatMessage {
 
 type BridgeEvent =
   | { type: "session" }
+  | {
+      type: "capabilities";
+      capabilities: {
+        commands: boolean;
+        imageInput: boolean;
+        modelAcceptsImages: boolean | null;
+      };
+    }
   | { type: "status"; status: "idle" | "working" | "waiting" }
   | { type: "message"; message: ChatMessage }
   | {
@@ -53,12 +61,20 @@ type BridgeEvent =
 interface PiContextLike {
   mode?: string;
   isIdle?: () => boolean;
+  model?: { input?: string[] };
   sessionManager?: {
     getSessionFile?: () => string | undefined;
   };
 }
 
 interface PiApiLike {
+  sendUserMessage(
+    content: Array<
+      | { type: "text"; text: string }
+      | { type: "image"; data: string; mimeType: string }
+    >,
+    options?: { deliverAs?: "steer" | "followUp" },
+  ): void;
   on(
     event: string,
     handler: (event: Record<string, unknown>, ctx: PiContextLike) => void | Promise<void>,
@@ -68,11 +84,33 @@ interface PiApiLike {
   };
 }
 
+interface BridgeCommand {
+  id: string;
+  requestId: string;
+  type: "user-message";
+  text: string;
+  images: Array<{
+    uploadId: string;
+    name: string;
+    mimeType: string;
+    size: number;
+    sha256: string;
+  }>;
+  delivery: "immediate-or-steer";
+}
+
+interface BridgeImagePayload {
+  data: string;
+  mimeType: string;
+  sha256: string;
+}
+
 const paneId = process.env.HERDR_PANE_ID ?? "";
 const enabled = process.env.HERDR_ENV === "1" && Boolean(paneId);
 const endpoint =
   process.env.HERZI_REALTIME_URL ??
   `http://127.0.0.1:${process.env.HERZI_PORT ?? "3030"}/api/integrations/pi/events`;
+const integrationBase = new URL("/api/integrations/pi/", endpoint);
 
 export default function herziBridge(pi: PiApiLike): void {
   if (!enabled) return;
@@ -86,6 +124,8 @@ export default function herziBridge(pi: PiApiLike): void {
   let sending = false;
   let agentActive = false;
   let waitingCount = 0;
+  let activeContext: PiContextLike | null = null;
+  let commandAbort: AbortController | null = null;
 
   const updateSession = (ctx: PiContextLike): boolean => {
     const next = ctx.sessionManager?.getSessionFile?.();
@@ -119,7 +159,7 @@ export default function herziBridge(pi: PiApiLike): void {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
-          version: 1,
+          version: 2,
           paneId,
           sessionPath,
           runtimeId,
@@ -164,6 +204,133 @@ export default function herziBridge(pi: PiApiLike): void {
     publishStatus(ctx);
   };
 
+  const publishCapabilities = (ctx: PiContextLike): void => {
+    const modelInput = ctx.model?.input;
+    queue(
+      "capabilities",
+      {
+        type: "capabilities",
+        capabilities: {
+          commands: true,
+          imageInput: true,
+          modelAcceptsImages: Array.isArray(modelInput)
+            ? modelInput.includes("image")
+            : null,
+        },
+      },
+      ctx,
+    );
+  };
+
+  const bridgeIdentity = () => ({ paneId, sessionPath, runtimeId });
+
+  const acknowledgeCommand = async (
+    commandId: string,
+    status: "dispatched" | "failed",
+    error?: string,
+  ): Promise<void> => {
+    try {
+      await fetch(new URL(`commands/${encodeURIComponent(commandId)}/ack`, integrationBase), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ ...bridgeIdentity(), status, ...(error ? { error } : {}) }),
+        signal: AbortSignal.timeout(2_000),
+      });
+    } catch {
+      // Command acknowledgement is diagnostic; Pi input must not depend on it.
+    }
+  };
+
+  const fetchCommandImage = async (
+    command: BridgeCommand,
+    image: BridgeCommand["images"][number],
+  ): Promise<BridgeImagePayload> => {
+    const response = await fetch(
+      new URL(`uploads/${encodeURIComponent(image.uploadId)}`, integrationBase),
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ ...bridgeIdentity(), commandId: command.id }),
+        signal: AbortSignal.timeout(10_000),
+      },
+    );
+    if (!response.ok) throw new Error(`Image fetch failed (${response.status})`);
+    const payload = (await response.json()) as BridgeImagePayload;
+    if (
+      typeof payload.data !== "string" ||
+      payload.mimeType !== image.mimeType ||
+      payload.sha256 !== image.sha256
+    ) {
+      throw new Error("Image metadata mismatch");
+    }
+    const bytes = Buffer.from(payload.data, "base64");
+    if (
+      bytes.length !== image.size ||
+      createHash("sha256").update(bytes).digest("hex") !== image.sha256
+    ) {
+      throw new Error("Image integrity check failed");
+    }
+    return payload;
+  };
+
+  const processCommand = async (command: BridgeCommand): Promise<void> => {
+    try {
+      const images = await Promise.all(
+        command.images.map((image) => fetchCommandImage(command, image)),
+      );
+      const content: Array<
+        | { type: "text"; text: string }
+        | { type: "image"; data: string; mimeType: string }
+      > = [
+        ...(command.text ? [{ type: "text" as const, text: command.text }] : []),
+        ...images.map((image) => ({
+          type: "image" as const,
+          data: image.data,
+          mimeType: image.mimeType,
+        })),
+      ];
+      pi.sendUserMessage(
+        content,
+        activeContext?.isIdle?.() === false ? { deliverAs: "steer" } : undefined,
+      );
+      await acknowledgeCommand(command.id, "dispatched");
+    } catch (error) {
+      await acknowledgeCommand(
+        command.id,
+        "failed",
+        error instanceof Error ? error.message : "Unknown image command failure",
+      );
+    }
+  };
+
+  const startCommandLoop = (ctx: PiContextLike): void => {
+    activeContext = ctx;
+    commandAbort?.abort();
+    const controller = new AbortController();
+    commandAbort = controller;
+
+    const run = async () => {
+      while (rootSession && !controller.signal.aborted) {
+        try {
+          updateSession(ctx);
+          const response = await fetch(new URL("commands/poll", integrationBase), {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(bridgeIdentity()),
+            signal: controller.signal,
+          });
+          if (!response.ok) throw new Error(`Command poll failed (${response.status})`);
+          const payload = (await response.json()) as { command?: unknown };
+          if (isBridgeCommand(payload.command)) await processCommand(payload.command);
+        } catch {
+          if (controller.signal.aborted) return;
+          await delay(1_000, controller.signal);
+        }
+      }
+    };
+    void run();
+  };
+
   pi.on("session_start", (event, ctx) => {
     if (ctx.mode !== "tui" || !updateSession(ctx)) return;
     rootSession = true;
@@ -171,7 +338,13 @@ export default function herziBridge(pi: PiApiLike): void {
     waitingCount = 0;
     pending.clear();
     queue("session", { type: "session" }, ctx);
+    publishCapabilities(ctx);
     publishStatus(ctx);
+    startCommandLoop(ctx);
+  });
+
+  pi.on("model_select", (_event, ctx) => {
+    if (rootSession) publishCapabilities(ctx);
   });
 
   pi.on("agent_start", (_event, ctx) => {
@@ -262,6 +435,9 @@ export default function herziBridge(pi: PiApiLike): void {
 
   pi.on("session_shutdown", async (_event, ctx) => {
     if (!rootSession) return;
+    commandAbort?.abort();
+    commandAbort = null;
+    activeContext = null;
     agentActive = false;
     waitingCount = 0;
     publishStatus(ctx);
@@ -281,6 +457,15 @@ function toChatMessage(
 ): ChatMessage | null {
   if (!isRecord(value)) return null;
   if (value.role !== "user" && value.role !== "assistant") return null;
+  if (
+    value.role === "user" &&
+    Array.isArray(value.content) &&
+    value.content.some((part) => isRecord(part) && part.type === "image")
+  ) {
+    // Keep image bytes out of the realtime HTTP batch. The optimistic UI remains
+    // until the authoritative JSONL user message is available.
+    return null;
+  }
 
   const createdAt =
     typeof value.timestamp === "number" && Number.isFinite(value.timestamp)
@@ -391,6 +576,44 @@ function toJsonValue(value: unknown): unknown {
 
 function clip(value: string): string {
   return value.length > 256_000 ? `${value.slice(0, 256_000)}\n…[truncated]` : value;
+}
+
+function isBridgeCommand(value: unknown): value is BridgeCommand {
+  if (!isRecord(value) || value.type !== "user-message") return false;
+  return (
+    typeof value.id === "string" &&
+    typeof value.requestId === "string" &&
+    typeof value.text === "string" &&
+    value.delivery === "immediate-or-steer" &&
+    Array.isArray(value.images) &&
+    value.images.length > 0 &&
+    value.images.length <= 4 &&
+    value.images.every(
+      (image) =>
+        isRecord(image) &&
+        typeof image.uploadId === "string" &&
+        typeof image.name === "string" &&
+        typeof image.mimeType === "string" &&
+        typeof image.size === "number" &&
+        typeof image.sha256 === "string",
+    )
+  );
+}
+
+function delay(milliseconds: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal.aborted) return resolve();
+    const timer = setTimeout(resolve, milliseconds);
+    timer.unref?.();
+    signal.addEventListener(
+      "abort",
+      () => {
+        clearTimeout(timer);
+        resolve();
+      },
+      { once: true },
+    );
+  });
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

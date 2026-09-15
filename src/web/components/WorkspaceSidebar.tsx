@@ -18,6 +18,7 @@ import type {
   TabSummary,
   WorkspaceSummary,
 } from "../../shared/protocol";
+import { apiFetch } from "../api";
 
 type SidebarMenu =
   | {
@@ -464,7 +465,7 @@ async function requestJson<T = { ok: boolean }>(
   url: string,
   init: RequestInit,
 ): Promise<T> {
-  const response = await fetch(url, init);
+  const response = await apiFetch(url, init);
   const body = (await response.json().catch(() => null)) as
     | T
     | { error?: string }

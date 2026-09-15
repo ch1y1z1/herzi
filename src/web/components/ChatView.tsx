@@ -26,7 +26,15 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import { apiFetch } from "../api";
 import { markdownShared } from "../markdownPlugins";
+import {
+  ChatImagePart,
+  ComposerAddImage,
+  ComposerAttachments,
+  HerziImageAttachmentAdapter,
+  ToolResultImagePreview,
+} from "./ChatAttachments";
 import type {
   ChatJsonObject,
   ChatMessage,
@@ -89,7 +97,12 @@ export function ChatView({
   >([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [lastTransport, setLastTransport] = useState<"host-path" | "pi-native" | null>(null);
   const acknowledgedDoneRef = useRef(false);
+  const imageAttachmentAdapter = useMemo(
+    () => new HerziImageAttachmentAdapter(pane.id),
+    [pane.id],
+  );
 
   useEffect(() => {
     setChat({
@@ -101,6 +114,7 @@ export function ChatView({
     setPendingUserMessages([]);
     setLoading(true);
     setError("");
+    setLastTransport(null);
     acknowledgedDoneRef.current = false;
   }, [pane.id]);
 
@@ -154,7 +168,7 @@ export function ChatView({
     let disposed = false;
     const markSeen = async () => {
       try {
-        const response = await fetch(
+        const response = await apiFetch(
           `/api/panes/${encodeURIComponent(pane.id)}/seen`,
           { method: "POST" },
         );
@@ -210,22 +224,38 @@ export function ChatView({
         .map((part) => part.text)
         .join("\n")
         .trim();
-      if (!text) return;
+      const uploadedImages = (message.attachments ?? []).flatMap((attachment) => {
+        const upload = imageAttachmentAdapter.getUpload(attachment.id);
+        return upload ? [upload] : [];
+      });
+      if (!text && uploadedImages.length === 0) return;
 
+      const content: ChatPart[] = [
+        ...(text ? [{ type: "text" as const, text }] : []),
+        ...uploadedImages.map((upload) => ({
+          type: "image" as const,
+          image: upload.preview,
+          name: upload.name,
+          mimeType: upload.mimeType,
+          uploadId: upload.uploadId,
+          sha256: upload.sha256,
+        })),
+      ];
       const optimisticMessage: ChatMessage = {
         id: `optimistic:${pane.id}:${crypto.randomUUID()}`,
         role: "user",
         createdAt: Date.now(),
-        content: [{ type: "text", text }],
+        content,
       };
       setPendingUserMessages((current) => {
         const unmatched = unmatchedPendingUserMessages(
           authoritativeMessages,
           current,
         );
+        const fingerprint = userMessageFingerprint(optimisticMessage);
         const authoritativeOccurrence =
-          countUserMessages(authoritativeMessages, text) +
-          countUserMessages(unmatched, text);
+          countUserMessages(authoritativeMessages, fingerprint) +
+          countUserMessages(unmatched, fingerprint);
         return [
           ...unmatched,
           { ...optimisticMessage, authoritativeOccurrence },
@@ -233,19 +263,29 @@ export function ChatView({
       });
 
       try {
-        const response = await fetch(
+        const requestId = crypto.randomUUID();
+        const response = await apiFetch(
           `/api/panes/${encodeURIComponent(pane.id)}/prompt`,
           {
             method: "POST",
             headers: { "content-type": "application/json" },
-            body: JSON.stringify({ text }),
+            body: JSON.stringify({
+              requestId,
+              text,
+              attachments: uploadedImages.map((upload) => ({
+                uploadId: upload.uploadId,
+              })),
+            }),
           },
         );
+        const body = (await response.json().catch(() => null)) as
+          | { error?: string; transport?: "text" | "host-path" | "pi-native" }
+          | null;
         if (!response.ok) {
-          const body = (await response.json().catch(() => null)) as
-            | { error?: string }
-            | null;
           throw new Error(body?.error ?? `Prompt failed (${response.status})`);
+        }
+        if (body?.transport === "host-path" || body?.transport === "pi-native") {
+          setLastTransport(body.transport);
         }
         window.setTimeout(() => void loadChat(), 250);
       } catch (submitError) {
@@ -255,7 +295,7 @@ export function ChatView({
         throw submitError;
       }
     },
-    [authoritativeMessages, loadChat, pane.id],
+    [authoritativeMessages, imageAttachmentAdapter, loadChat, pane.id],
   );
 
   const runtime = useExternalStoreRuntime<DisplayMessage>({
@@ -265,8 +305,9 @@ export function ChatView({
     isRunning: running,
     isDisabled: pane.agent !== "pi",
     onNew,
+    adapters: { attachments: imageAttachmentAdapter },
     onCancel: async () => {
-      const response = await fetch(
+      const response = await apiFetch(
         `/api/panes/${encodeURIComponent(pane.id)}/cancel`,
         { method: "POST" },
       );
@@ -313,31 +354,37 @@ export function ChatView({
               </div>
             )}
             <ComposerPrimitive.Root className="chat-composer">
-              <ComposerPrimitive.Input
-                className="chat-input"
-                placeholder="Chat via Herzi…"
-                submitMode="enter"
-                rows={1}
-              />
-              <ThreadPrimitive.If running={true}>
-                <ComposerPrimitive.Cancel
-                  className="chat-send chat-cancel"
-                  aria-label="停止"
-                >
-                  <Square size={13} fill="currentColor" />
-                </ComposerPrimitive.Cancel>
-              </ThreadPrimitive.If>
-              <ThreadPrimitive.If running={false}>
-                <ComposerPrimitive.Send className="chat-send" aria-label="发送">
-                  <ArrowUp size={17} />
-                </ComposerPrimitive.Send>
-              </ThreadPrimitive.If>
+              <ComposerPrimitive.AttachmentDropzone className="composer-dropzone">
+                <ComposerAttachments />
+                <div className="composer-input-row">
+                  <ComposerAddImage />
+                  <ComposerPrimitive.Input
+                    className="chat-input"
+                    placeholder="Chat via Herzi… 粘贴图片"
+                    submitMode="enter"
+                    rows={1}
+                  />
+                  <ThreadPrimitive.If running={true}>
+                    <ComposerPrimitive.Cancel
+                      className="chat-send chat-cancel"
+                      aria-label="停止"
+                    >
+                      <Square size={13} fill="currentColor" />
+                    </ComposerPrimitive.Cancel>
+                  </ThreadPrimitive.If>
+                  <ThreadPrimitive.If running={false}>
+                    <ComposerPrimitive.Send className="chat-send" aria-label="发送">
+                      <ArrowUp size={17} />
+                    </ComposerPrimitive.Send>
+                  </ThreadPrimitive.If>
+                </div>
+              </ComposerPrimitive.AttachmentDropzone>
             </ComposerPrimitive.Root>
             <div className="composer-hint">
               <span className={`chat-sync ${realtime ? realtime.status : "polling"}`}>
-                {realtime ? realtimeLabel(realtime.status) : "JSONL 同步"}
+                {imageCapabilityLabel(realtime, lastTransport)}
               </span>
-              <span>Enter 发送 · Shift+Enter 换行 · 写入当前 Pi Pane</span>
+              <span>Enter 发送 · Shift+Enter 换行 · 可粘贴图片</span>
             </div>
           </ThreadPrimitive.ViewportFooter>
         </ThreadPrimitive.Viewport>
@@ -353,6 +400,7 @@ function UserMessage() {
         <MessagePrimitive.Parts
           components={{
             Text: UserText,
+            Image: ChatImagePart,
           }}
         />
       </div>
@@ -366,6 +414,7 @@ function AssistantMessage() {
       <MessagePrimitive.Parts
         components={{
           Text: AssistantText,
+          Image: ChatImagePart,
           Reasoning: ReasoningPart,
           tools: { Fallback: ToolFallback },
           data: { by_name: { activity: ActivityGroup } },
@@ -425,7 +474,13 @@ function ToolFallback({
       </summary>
       <div className="tool-detail">
         <ToolData label="Arguments" value={args} />
-        {complete && <ToolData label={isError ? "Error" : "Result"} value={result} />}
+        {complete && (
+          <ToolResultData
+            toolName={toolName}
+            label={isError ? "Error" : "Result"}
+            value={result}
+          />
+        )}
       </div>
     </details>
   );
@@ -565,7 +620,11 @@ function ActivityItemRow({ item }: { item: ActivityItem }) {
       <div className="tool-detail">
         <ToolData label="Arguments" value={item.args} />
         {complete && (
-          <ToolData label={item.isError ? "Error" : "Result"} value={item.result} />
+          <ToolResultData
+            toolName={item.toolName}
+            label={item.isError ? "Error" : "Result"}
+            value={item.result}
+          />
         )}
       </div>
     </details>
@@ -579,6 +638,41 @@ function ToolData({ label, value }: { label: string; value: unknown }) {
       <pre>{formatValue(value)}</pre>
     </section>
   );
+}
+
+function ToolResultData({
+  toolName,
+  label,
+  value,
+}: {
+  toolName: string;
+  label: string;
+  value: unknown;
+}) {
+  const payload = asToolResultPayload(value);
+  const visibleValue = payload ? payload.value : value;
+  const formattedValue = formatValue(visibleValue);
+  return (
+    <section>
+      <label>{label}</label>
+      {formattedValue && <pre>{formattedValue}</pre>}
+      <ToolResultImagePreview toolName={toolName} result={value} />
+    </section>
+  );
+}
+
+function asToolResultPayload(value: unknown):
+  | { type: "herzi-tool-result"; value: unknown; images: unknown[] }
+  | null {
+  if (!value || typeof value !== "object") return null;
+  const candidate = value as {
+    type?: unknown;
+    value?: unknown;
+    images?: unknown;
+  };
+  return candidate.type === "herzi-tool-result" && Array.isArray(candidate.images)
+    ? { type: "herzi-tool-result", value: candidate.value, images: candidate.images }
+    : null;
 }
 
 function formatValue(value: unknown): string {
@@ -879,24 +973,41 @@ function unmatchedPendingUserMessages(
 ): PendingUserMessage[] {
   return pending.filter(
     (candidate) =>
-      countUserMessages(authoritative, userMessageText(candidate)) <=
+      countUserMessages(authoritative, userMessageFingerprint(candidate)) <=
       candidate.authoritativeOccurrence,
   );
 }
 
-function countUserMessages(messages: ChatMessage[], text: string): number {
+function countUserMessages(messages: ChatMessage[], fingerprint: string): number {
   return messages.filter(
     (message) =>
-      message.role === "user" && userMessageText(message) === text,
+      message.role === "user" && userMessageFingerprint(message) === fingerprint,
   ).length;
 }
 
-function userMessageText(message: ChatMessage): string {
-  return message.content
+function userMessageFingerprint(message: ChatMessage): string {
+  const text = message.content
     .filter((part): part is Extract<ChatPart, { type: "text" }> => part.type === "text")
     .map((part) => part.text)
     .join("\n")
     .trim();
+  const images = message.content
+    .filter((part): part is Extract<ChatPart, { type: "image" }> => part.type === "image")
+    .map((part) => part.sha256 ?? part.uploadId ?? part.image);
+  return JSON.stringify({ text, images });
+}
+
+function imageCapabilityLabel(
+  realtime: ChatRealtimeState | undefined,
+  lastTransport: "host-path" | "pi-native" | null,
+): string {
+  if (realtime?.capabilities?.modelAcceptsImages === false) {
+    return "当前模型不支持图片";
+  }
+  if (lastTransport === "host-path") return "图片经宿主路径发送";
+  if (lastTransport === "pi-native") return "Pi 原生图片";
+  if (realtime?.capabilities?.imageInput) return "Pi 原生图片可用";
+  return realtime ? realtimeLabel(realtime.status) : "图片将经宿主路径发送";
 }
 
 function realtimeLabel(status: ChatRealtimeState["status"]): string {

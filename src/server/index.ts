@@ -1,7 +1,9 @@
+import { randomBytes, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import fastifyMultipart from "@fastify/multipart";
 import fastifyStatic from "@fastify/static";
 import fastifyWebsocket from "@fastify/websocket";
 import Fastify from "fastify";
@@ -10,9 +12,13 @@ import type { WebSocket } from "ws";
 import type {
   ChatSnapshot,
   ClientMessage,
+  PromptResponse,
   ServerMessage,
 } from "../shared/protocol.js";
 import { HerdrClient } from "./herdr-client.js";
+import { ImageUploadError, ImageUploadStore } from "./image-upload-store.js";
+import { appendManagedAttachments } from "./managed-attachments.js";
+import { PiCommandQueue, parseBridgeIdentity } from "./pi-command-queue.js";
 import { PiRealtimeStore, parsePiBridgeBatch } from "./pi-realtime.js";
 import { PiSessionReader } from "./pi-session-reader.js";
 import { TerminalObserver } from "./terminal-observer.js";
@@ -24,14 +30,46 @@ const app = Fastify({ logger: true });
 const herdr = new HerdrClient();
 const clients = new Set<WebSocket>();
 const observers = new Map<WebSocket, TerminalObserver>();
-const piSessions = new PiSessionReader();
+const uploads = new ImageUploadStore();
+const piSessions = new PiSessionReader((uploadId, paneId, sessionPath) =>
+  uploads.dataUrlFor(uploadId, paneId, sessionPath),
+);
 const piRealtime = new PiRealtimeStore();
+const piCommands = new PiCommandQueue();
+const requestToken = randomBytes(32).toString("base64url");
 
 interface TabCreatedResult {
   root_pane: { pane_id: string };
 }
 
 await app.register(fastifyWebsocket);
+await app.register(fastifyMultipart, {
+  limits: { files: 1, fileSize: 10 * 1024 * 1024, parts: 2 },
+});
+
+app.addHook("preHandler", async (request, reply) => {
+  if (
+    request.method === "GET" ||
+    request.method === "HEAD" ||
+    request.method === "OPTIONS" ||
+    request.url.startsWith("/api/integrations/pi/")
+  ) {
+    return;
+  }
+
+  const origin = request.headers.origin;
+  if (origin && !isAllowedOrigin(origin)) {
+    return reply.code(403).send({ error: "Cross-origin mutation rejected" });
+  }
+  if (request.headers["x-herzi-request-token"] !== requestToken) {
+    return reply.code(403).send({ error: "Missing or invalid request token" });
+  }
+});
+
+app.get("/api/request-token", async (_request, reply) => {
+  reply.header("cache-control", "no-store");
+  return { token: requestToken };
+});
 
 app.get("/api/health", async () => ({
   ok: true,
@@ -157,6 +195,66 @@ app.delete<{ Params: { tabId: string } }>(
   },
 );
 
+app.post<{ Params: { paneId: string } }>(
+  "/api/panes/:paneId/uploads",
+  async (request, reply) => {
+    const pane = herdr.getPane(request.params.paneId);
+    if (!pane || pane.agent !== "pi") {
+      return reply.code(404).send({ error: "Pi pane not found" });
+    }
+
+    try {
+      const part = await request.file();
+      if (!part) return reply.code(400).send({ error: "Image file is required" });
+      const upload = await uploads.create({
+        paneId: pane.id,
+        sessionPath: herdr.getPiSessionPath(pane.id),
+        name: part.filename,
+        stream: part.file,
+      });
+      if (part.file.truncated) {
+        await uploads.delete(upload.uploadId);
+        return reply.code(413).send({ error: "Image exceeds the 10 MiB limit" });
+      }
+      return reply.code(201).send(upload);
+    } catch (error) {
+      if (error instanceof ImageUploadError) {
+        const status = error.code === "too-large" ? 413 : 400;
+        return reply.code(status).send({ error: error.message });
+      }
+      if (error instanceof app.multipartErrors.RequestFileTooLargeError) {
+        return reply.code(413).send({ error: "Image exceeds the 10 MiB limit" });
+      }
+      request.log.warn({ err: error }, "Failed to store image upload");
+      return reply.code(500).send({ error: "Image upload failed" });
+    }
+  },
+);
+
+app.delete<{ Params: { paneId: string; uploadId: string } }>(
+  "/api/panes/:paneId/uploads/:uploadId",
+  async (request, reply) => {
+    const pane = herdr.getPane(request.params.paneId);
+    if (!pane || pane.agent !== "pi") {
+      return reply.code(404).send({ error: "Pi pane not found" });
+    }
+    try {
+      await uploads.getBound(
+        request.params.uploadId,
+        pane.id,
+        herdr.getPiSessionPath(pane.id),
+      );
+      await uploads.delete(request.params.uploadId);
+      return { ok: true };
+    } catch (error) {
+      if (error instanceof ImageUploadError) {
+        return reply.code(404).send({ error: error.message });
+      }
+      throw error;
+    }
+  },
+);
+
 app.get<{ Params: { paneId: string } }>(
   "/api/panes/:paneId/chat",
   async (request, reply) => {
@@ -230,9 +328,76 @@ app.post<{ Body: unknown }>("/api/integrations/pi/events", async (request, reply
   return { ok: true };
 });
 
+app.post<{ Body: unknown }>(
+  "/api/integrations/pi/commands/poll",
+  async (request, reply) => {
+    const identity = parseBridgeIdentity(request.body);
+    if (!identity || !bridgeIdentityMatches(identity)) {
+      return reply.code(409).send({ error: "Pi bridge identity does not match Herdr" });
+    }
+    const controller = new AbortController();
+    request.raw.once("aborted", () => controller.abort());
+    const command = await piCommands.poll(identity, controller.signal);
+    return { command };
+  },
+);
+
+app.post<{
+  Params: { commandId: string };
+  Body: unknown;
+}>("/api/integrations/pi/commands/:commandId/ack", async (request, reply) => {
+  const identity = parseBridgeIdentity(request.body);
+  const body = isRecord(request.body) ? request.body : null;
+  const status = body?.status;
+  if (
+    !identity ||
+    !bridgeIdentityMatches(identity) ||
+    (status !== "dispatched" && status !== "failed")
+  ) {
+    return reply.code(409).send({ error: "Invalid Pi command acknowledgement" });
+  }
+  const accepted = piCommands.ack(
+    identity,
+    request.params.commandId,
+    status,
+    typeof body?.error === "string" ? body.error : undefined,
+  );
+  return accepted
+    ? { ok: true }
+    : reply.code(409).send({ error: "Pi command is not claimed by this runtime" });
+});
+
+app.post<{
+  Params: { uploadId: string };
+  Body: unknown;
+}>("/api/integrations/pi/uploads/:uploadId", async (request, reply) => {
+  const identity = parseBridgeIdentity(request.body);
+  const body = isRecord(request.body) ? request.body : null;
+  if (
+    !identity ||
+    !bridgeIdentityMatches(identity) ||
+    typeof body?.commandId !== "string" ||
+    !piCommands.ownsClaim(identity, body.commandId)
+  ) {
+    return reply.code(409).send({ error: "Pi bridge cannot access this image" });
+  }
+  try {
+    return await uploads.readBase64(
+      request.params.uploadId,
+      identity.paneId,
+      identity.sessionPath,
+    );
+  } catch (error) {
+    if (error instanceof ImageUploadError) {
+      return reply.code(404).send({ error: error.message });
+    }
+    throw error;
+  }
+});
+
 app.post<{
   Params: { paneId: string };
-  Body: { text?: unknown };
+  Body: { text?: unknown; requestId?: unknown; attachments?: unknown };
 }>("/api/panes/:paneId/prompt", async (request, reply) => {
   const pane = herdr.getPane(request.params.paneId);
   if (!pane || pane.agent !== "pi") {
@@ -240,18 +405,100 @@ app.post<{
   }
 
   const text = typeof request.body?.text === "string" ? request.body.text.trim() : "";
-  if (!text) return reply.code(400).send({ error: "Prompt text is required" });
+  const uploadIds = parseUploadIds(request.body?.attachments);
+  if (!uploadIds) {
+    return reply.code(400).send({ error: "Invalid image attachments" });
+  }
+  if (!text && uploadIds.length === 0) {
+    return reply.code(400).send({ error: "Prompt text or an image is required" });
+  }
   if (text.length > 100_000) {
     return reply.code(413).send({ error: "Prompt is too large" });
   }
 
+  const requestId =
+    typeof request.body?.requestId === "string" && request.body.requestId.length <= 100
+      ? request.body.requestId
+      : randomUUID();
+  const sessionPath = herdr.getPiSessionPath(pane.id);
+
   try {
+    const attachmentRecords = await Promise.all(
+      uploadIds.map((uploadId) => uploads.getBound(uploadId, pane.id, sessionPath)),
+    );
+    const totalImageBytes = attachmentRecords.reduce(
+      (total, record) => total + record.size,
+      0,
+    );
+    if (totalImageBytes > 20 * 1024 * 1024) {
+      return reply.code(413).send({ error: "Images exceed the 20 MiB message limit" });
+    }
+
+    const capabilities = sessionPath
+      ? piRealtime.getCapabilities(pane.id, sessionPath)
+      : undefined;
+    if (
+      uploadIds.length > 0 &&
+      sessionPath &&
+      piCommands.isAvailable(pane.id, sessionPath) &&
+      capabilities?.commands &&
+      capabilities.imageInput &&
+      capabilities.modelAcceptsImages !== false
+    ) {
+      const images = attachmentRecords.map((record) => ({
+        uploadId: record.uploadId,
+        name: record.name,
+        mimeType: record.mimeType,
+        size: record.size,
+        sha256: record.sha256,
+      }));
+      piCommands.enqueue({
+        paneId: pane.id,
+        sessionPath,
+        requestId,
+        text,
+        images,
+      });
+      await Promise.all(
+        uploadIds.map((uploadId) => uploads.markSubmitted(uploadId, "native")),
+      );
+      const response: PromptResponse = {
+        ok: true,
+        requestId,
+        transport: "pi-native",
+        status: "queued",
+      };
+      return response;
+    }
+
+    const managed = await Promise.all(
+      attachmentRecords.map(async (record) => ({
+        id: record.uploadId,
+        path: await uploads.managedPath(record.uploadId, pane.id, sessionPath),
+        mimeType: record.mimeType,
+      })),
+    );
+    const promptText = managed.length
+      ? appendManagedAttachments(text, managed)
+      : text;
+
     await herdr.request("agent.prompt", {
       target: pane.id,
-      text,
+      text: promptText,
     });
-    return { ok: true };
+    await Promise.all(uploadIds.map((uploadId) => uploads.markSubmitted(uploadId, "fallback")));
+
+    const response: PromptResponse = {
+      ok: true,
+      requestId,
+      transport: managed.length ? "host-path" : "text",
+      status: "submitted",
+    };
+    return response;
   } catch (error) {
+    if (error instanceof ImageUploadError) {
+      return reply.code(409).send({ error: error.message });
+    }
     request.log.warn({ err: error }, "Failed to prompt Pi pane");
     return reply.code(502).send({
       error: error instanceof Error ? error.message : "Herdr prompt failed",
@@ -503,10 +750,22 @@ herdr.on("snapshot", (snapshot) => {
 });
 herdr.on("error", (error) => app.log.warn({ err: error }, "Herdr connection error"));
 herdr.startPolling();
+void uploads.cleanup().catch((error) =>
+  app.log.warn({ err: error }, "Failed to clean expired image uploads"),
+);
+const uploadCleanupTimer = setInterval(() => {
+  piCommands.cleanup();
+  void uploads.cleanup().catch((error) =>
+    app.log.warn({ err: error }, "Failed to clean expired image uploads"),
+  );
+}, 30 * 60 * 1_000);
+uploadCleanupTimer.unref();
 
 const shutdown = async () => {
   for (const observer of observers.values()) observer.stop();
   observers.clear();
+  clearInterval(uploadCleanupTimer);
+  piCommands.stop();
   herdr.stop();
   await app.close();
 };
@@ -526,4 +785,47 @@ function broadcast(message: ServerMessage): void {
 function stopObserver(socket: WebSocket): void {
   observers.get(socket)?.stop();
   observers.delete(socket);
+}
+
+function bridgeIdentityMatches(identity: {
+  paneId: string;
+  sessionPath: string;
+}): boolean {
+  const pane = herdr.getPane(identity.paneId);
+  return (
+    pane?.agent === "pi" &&
+    herdr.getPiSessionPath(identity.paneId) === identity.sessionPath
+  );
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function parseUploadIds(value: unknown): string[] | null {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > 4) return null;
+  const ids = value.map((item) =>
+    typeof item === "object" && item !== null && "uploadId" in item
+      ? item.uploadId
+      : null,
+  );
+  if (ids.some((id) => typeof id !== "string" || id.length > 100)) return null;
+  if (new Set(ids).size !== ids.length) return null;
+  return ids as string[];
+}
+
+function isAllowedOrigin(origin: string): boolean {
+  try {
+    const url = new URL(origin);
+    return (
+      (url.protocol === "http:" || url.protocol === "https:") &&
+      (url.hostname === "127.0.0.1" ||
+        url.hostname === "localhost" ||
+        url.hostname === "[::1]" ||
+        url.hostname === "::1")
+    );
+  } catch {
+    return false;
+  }
 }

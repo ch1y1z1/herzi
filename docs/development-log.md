@@ -522,3 +522,86 @@ npm start
 - 单 `$` 行内公式开启后，裸价格依赖 `escapeCurrencyDollars` 启发式保护，极端格式仍可能误判。
 - 跨行 `\(...\)` 不被归一化（模型极少输出），会原样显示为文本。
 - streaming 中未闭合的公式会短暂显示原始源码，闭合后自动恢复。
+
+## 2026-09-15：Chat 图片粘贴与 Pi 原生图片通道
+
+### 目标与取舍
+
+- 用户要求开始实施 [`image-paste-implementation-plan.md`](./image-paste-implementation-plan.md)。
+- 保持 terminal-backed 单 runtime 所有权：bridge 在线时调用同一 Pi runtime 的 `pi.sendUserMessage()`；bridge 不在线时通过 Herdr `agent.prompt` 发送受管宿主文件路径。
+- 没有另起 Pi SDK/RPC、没有修改 Pi JSONL、没有改系统剪贴板，也没有向真实用户 Agent 发送测试 prompt。
+
+### 代码变更
+
+- `src/web/components/ChatAttachments.tsx`：新增 assistant-ui attachment adapter，支持 PNG/JPEG/WebP/GIF 的 paste/drop/picker、待发送缩略图、移除、上传、user/assistant 图片展示和 lightbox。
+- `src/web/components/ChatView.tsx`：External Store 启用 attachment capability；`onNew` 接收 text + uploads；optimistic user message 包含图片，并用规范化文本 + ordered SHA-256 fingerprint 与 realtime/JSONL 收敛。
+- `src/web/api.ts`：新增 per-process request token 获取和 mutation wrapper；兼容新 Web bundle 暂时由未重启旧 server 提供时的 token endpoint 404。
+- `src/web/components/WorkspaceSidebar.tsx`：现有 Workspace/Tab mutation 改走统一受保护请求。
+- `src/web/styles.css`：新增 composer dropzone、attachment tile/loading/remove、消息图片和 lightbox 样式，沿用项目既有浅色视觉语言。
+- `src/server/image-upload-store.ts`：multipart 流式写入 OS temp 私有 Herzi 目录；服务端生成 UUID，校验 magic bytes、图片尺寸、40MP/16384 边界、10 MiB 单图限制，记录 SHA-256，文件 0600；metadata ledger 支持重启恢复与 TTL cleanup。
+- `src/server/managed-attachments.ts`：生成/解析 fallback `<herzi-attachments>` block；普通 malformed user block 保持可见。
+- `src/server/pi-session-reader.ts`：Pi 原生 image 增加 SHA-256；fallback marker 只经 UploadStore 的 Pane/session resolver 恢复图片；增加小型 data URL/hash cache，避免每轮重复读取/计算。
+- `src/server/pi-command-queue.ts`：增加 bridge presence、20 秒 long poll、requestId 幂等、单 runtime claim、ack、TTL 与 aborted poll 释放。
+- `src/server/pi-realtime.ts` / `src/shared/protocol.ts`：兼容 bridge batch v1/v2，并加入 image capability、upload、command 和 transport 类型。
+- `src/server/index.ts`：注册 `@fastify/multipart`，新增 upload/delete、command poll/ack/image read endpoints；prompt route 按 capability 选择 `pi-native` 或 `host-path`；新增 request token 与 Origin guard。
+- `integrations/pi/extensions/herzi-bridge.ts`：protocol v2 上报 model image capability；session 生命周期内运行 command poll；领取图片后复核 size/hash，调用 `pi.sendUserMessage([{type:"image",data,mimeType}])` 并 ack；含图片 realtime user event 不重复上报大型 base64。
+- 新增 Vitest、jsdom、Testing Library 以及 `npm test` 脚本。
+
+### 安全与资源边界
+
+- 单消息最多 4 张图片、总计 20 MiB；单张最多 10 MiB；SVG/未知格式拒绝。
+- uploadId、commandId、Pane、exact session path 和 runtime claim 多层绑定；浏览器不能指定服务端路径。
+- multipart mutation 需要随机 request token；恶意 Origin 被拒绝。Pi integration endpoints 不使用 browser token，但必须通过 Herdr exact identity 和 command claim。
+- 图片、base64、prompt 正文和绝对路径不写普通日志。
+- 未提交 upload 1 小时清理；native host 副本 24 小时；fallback 文件 30 天。当前未实现全局 500 MiB LRU，记录为后续硬化项。
+
+### 自动测试与构建
+
+- `npm test`：6 个测试文件、18 个测试全部通过。
+- 覆盖：assistant-ui paste -> tile -> upload -> `onNew`；前端类型/大小限制；server MIME/尺寸/像素/权限/hash；Pane/session identity；fallback marker 历史恢复；Pi 原生 image hash；bridge v1/v2 capability；command 幂等、claim、跨 runtime ack 与 aborted long poll。
+- `npm run typecheck` 通过。
+- `npm run build` 完整通过；server bundle 约 62.5 kB，Web build 只保留既有 `>500 kB` chunk warning。
+- 独立 3031 production server 只读/拒绝路径冒烟：homepage 200、当前 hashed asset 200、request token 获取成功、无 token mutation 403、恶意 Origin 403、受保护的不存在 Pane 404、错误 bridge identity 409；验证后已停止该临时 server并删除临时 pid/log。
+- `npm audit --omit=dev` 为 0 vulnerabilities；完整 audit 仍有 1 个 low severity 的 Windows dev-server `esbuild` advisory，本轮未执行可能扩大依赖变化的自动修复。
+- `git diff --check` 通过。
+
+### 验证边界
+
+- browser-use 无法连接本机 Chrome；doctor 明确报告 Chrome 尚未启用 remote debugging。没有为了测试擅自切换或配置用户浏览器，改用 jsdom 对真实 assistant-ui `ComposerPrimitive.Input` paste 链路验证。
+- 没有安装或 `/reload` protocol v2 Pi package，未对真实 Pi Pane 发送图片。因此 `pi-native` 和 `host-path` 的完整写入链仍需在专用 Pane 人工验收。
+- 当前 3030 运行中的旧 server 未由本轮重启；新 Web bundle 对旧 server token endpoint 404 做了兼容，但图片 endpoint 和 bridge v2 必须重启 server 后才可用。
+- 实施中发现一个非本轮创建的未跟踪文件 `docs/herdr-worktree.md`；按协作规则暂停并询问用户。用户选择保留并继续，本轮未读取、修改或删除该文件。
+
+## 2026-09-15：Pi `read` 图片工具结果预览
+
+### 用户要求与根因
+
+- 用户要求在 Pi 的 `read` 图片工具调用渲染组件中显示图片预览。
+- Pi session 的 `toolResult.content` 对读取图片会同时包含 text part 和 image part；原 `PiSessionReader.toolResultValue()` 只保留文本，并把图片降级为 `[image: mime]` 字符串，因此 Chat tool card 不可能渲染真实图片。
+- read tool call 既可能直接出现在运行中的消息区，也可能在 turn 完成后进入 `Worked for` activity；两条渲染路径都需要复用同一预览组件。
+
+### 实现
+
+- `src/shared/protocol.ts` 新增 `ChatToolResultPayload` / `ChatToolResultImage`，在不改变既有 tool-call part 结构的前提下，把工具文本结果与图片 data URL、MIME、SHA-256 一起装入 result。
+- `src/server/pi-session-reader.ts` 保留 toolResult image content，不再生成图片占位文本；继续按 `toolCallId` 关联到原 read tool call，并复用 image hash cache。
+- `src/web/components/ChatAttachments.tsx` 新增 `ToolResultImagePreview`：仅对 `toolName === "read"` 渲染图片；缩略图点击后复用已有 lightbox。
+- `src/web/components/ChatView.tsx` 的普通 tool card 与 activity tool row 都改用 `ToolResultData`，文本结果照常显示，图片紧随其后；非 read 工具即使未来携带图片也不会误用该专用展示。
+- `src/web/styles.css` 增加 read result 图片网格、240px 缩略图和 220px 高度约束。
+
+### 验证
+
+- `src/server/pi-session-reader.test.ts` 增加真实结构的 assistant toolCall + toolResult(text + image) 投影测试，确认 result 保存 data URL、MIME 与 SHA-256。
+- `src/web/components/ChatAttachments.test.tsx` 增加 read 预览渲染和非 read 不渲染测试。
+- `npm test`：6 files / 21 tests 全部通过。
+- `npm run typecheck` 通过。
+- `npm run build` 完整通过；仅保留既有 Web chunk size warning。
+- `git diff --check` 通过。
+- 未操作真实 Pi Pane；需要服务重启后，在包含真实 `read` 图片调用的专用会话中目测 tool card 展开、activity 展开和 lightbox。
+
+## 2026-09-15：安装 Pi 图片输入集成
+
+- 用户明确要求安装项目中的 Pi 图片输入集成。
+- 在仓库根目录执行 `pi install ./integrations/pi`，命令返回 `Installed ./integrations/pi`。
+- 随后执行只读 `pi list` 验证，用户 package 列表已包含 `../../agent_workspace/herzi/integrations/pi`，解析路径为当前仓库 `/Users/chiyizi/agent_workspace/herzi/integrations/pi`。
+- 该安装登记项目本地 package 路径；后续启动的 Pi 进程会自动加载 bridge v2。安装前已经运行的 Pi 不会热加载新 package，需在目标会话执行 `/reload` 或重启 Pi。
+- 本轮没有代用户向任何已有 Pi Pane 发送 `/reload` 或 prompt，也没有重启当前 3030 Herzi server；真实图片输入还要求 Herzi server 运行包含 image endpoints/command queue 的新构建。

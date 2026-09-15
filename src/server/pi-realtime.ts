@@ -2,10 +2,11 @@ import type {
   ChatRealtimeEvent,
   ChatRealtimeState,
   ChatRealtimeTool,
+  PiBridgeCapabilities,
 } from "../shared/protocol.js";
 
 export interface PiBridgeBatch {
-  version: 1;
+  version: 1 | 2;
   paneId: string;
   sessionPath: string;
   runtimeId: string;
@@ -44,6 +45,9 @@ export class PiRealtimeStore {
           state.messageMap.clear();
           state.toolMap.clear();
           break;
+        case "capabilities":
+          state.capabilities = event.capabilities;
+          break;
         case "status":
           state.status = event.status;
           break;
@@ -74,6 +78,14 @@ export class PiRealtimeStore {
     return state?.sessionPath === sessionPath ? state.branchLeafId : undefined;
   }
 
+  getCapabilities(
+    paneId: string,
+    sessionPath: string,
+  ): PiBridgeCapabilities | undefined {
+    const state = this.states.get(paneId);
+    return state?.sessionPath === sessionPath ? state.capabilities : undefined;
+  }
+
   snapshots(): ChatRealtimeState[] {
     return Array.from(this.states.values(), publicState);
   }
@@ -82,7 +94,7 @@ export class PiRealtimeStore {
 export function parsePiBridgeBatch(value: unknown): PiBridgeBatch | null {
   if (!isRecord(value)) return null;
   if (
-    value.version !== 1 ||
+    (value.version !== 1 && value.version !== 2) ||
     typeof value.paneId !== "string" ||
     typeof value.sessionPath !== "string" ||
     typeof value.runtimeId !== "string" ||
@@ -98,7 +110,7 @@ export function parsePiBridgeBatch(value: unknown): PiBridgeBatch | null {
   if (events.length !== value.events.length) return null;
 
   return {
-    version: 1,
+    version: value.version,
     paneId: value.paneId,
     sessionPath: value.sessionPath,
     runtimeId: value.runtimeId,
@@ -115,6 +127,7 @@ function createState(batch: PiBridgeBatch): StoredState {
     status: "idle",
     branchLeafId: undefined,
     branchRevision: 0,
+    capabilities: undefined,
     messages: [],
     tools: [],
     updatedAt: Date.now(),
@@ -134,6 +147,7 @@ function publicState(state: StoredState): ChatRealtimeState {
       ? { branchLeafId: state.branchLeafId }
       : {}),
     branchRevision: state.branchRevision,
+    ...(state.capabilities ? { capabilities: state.capabilities } : {}),
     messages: Array.from(state.messageMap.values()),
     tools: Array.from(state.toolMap.values()),
     updatedAt: state.updatedAt,
@@ -145,6 +159,8 @@ function isRealtimeEvent(value: unknown): value is ChatRealtimeEvent {
   switch (value.type) {
     case "session":
       return true;
+    case "capabilities":
+      return isBridgeCapabilities(value.capabilities);
     case "status":
       return value.status === "idle" || value.status === "working" || value.status === "waiting";
     case "message":
@@ -164,6 +180,15 @@ function isRealtimeEvent(value: unknown): value is ChatRealtimeEvent {
     default:
       return false;
   }
+}
+
+function isBridgeCapabilities(value: unknown): value is PiBridgeCapabilities {
+  if (!isRecord(value)) return false;
+  return (
+    typeof value.commands === "boolean" &&
+    typeof value.imageInput === "boolean" &&
+    (value.modelAcceptsImages === null || typeof value.modelAcceptsImages === "boolean")
+  );
 }
 
 function trimMap<Key, Value>(map: Map<Key, Value>, maximum: number): void {
