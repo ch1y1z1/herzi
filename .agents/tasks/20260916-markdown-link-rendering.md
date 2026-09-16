@@ -1,6 +1,6 @@
 # Markdown 链接渲染
 
-- 状态：Worker A 实现完成，已本地验证，待 Integrator 集成与浏览器验收。
+- 状态：已由 Integrator 集成并通过集成态自动验证，待浏览器验收和批次最终确认。
 - 目标：让 Chat 中 Markdown 链接具有默认高亮、hover/focus 高亮，并默认在新浏览器 tab 打开。
 - 修改范围：`src/web/markdownPlugins.ts`、`src/web/styles.css`、一个新的 Markdown link renderer 及其前端测试；不修改 `ChatView.tsx`。
 - 验收条件：assistant 正文和 activity 内嵌 Markdown 共用行为；链接具有可辨识颜色/下划线、键盘 focus 样式；anchor 使用 `target="_blank"` 与 `rel="noopener noreferrer"`；测试通过。
@@ -60,3 +60,12 @@
 - 建议在集成后补一条 `docs/` 说明或索引条目（参照 `docs/latex-rendering-fix.md` 的形式），Worker 范围内未创建 `docs/` 文件。
 - 本改动只触碰 `markdownPlugins.ts` 与 `styles.css`；若另一 Worker 也修改 `styles.css` 同区域需按 commit 冲突处理（本任务新增块位于 `.markdown-body pre code` 与 `.reasoning-block` 之间，未改动既有行）。
 - 未合并、未 rebase、未 push `main`。
+
+## Integrator 阶段记录
+
+- 已将 Worker commit `ee77e0b`、`eaf19a5` 无冲突 cherry-pick 为 integration commit `7cee417`、`cea7125`。
+- 集成分支目标测试：`npm test -- src/web/markdownLink.test.tsx`，PASS（1 file / 7 tests）。
+- 集成分支类型检查：`npm run typecheck`，PASS。
+- 集成分支构建：`npm run build`，PASS；Vite 保留既有 chunk size warning，不是本次新增失败。
+- 一次命令执行失误：最初两条并行验证命令未显式 `cd` 到 integration worktree，其中主工作区的目标测试因尚无新测试文件返回 `No test files found`，主工作区 typecheck PASS；随后在正确 integration worktree 重新执行并全部通过。该误执行未修改 tracked 文件或进程。
+- 全量 `npm test` 留到 Prompt Worker 集成后统一执行；真实浏览器 hover/focus/new-tab 验收仍为 `NOT RUN`。

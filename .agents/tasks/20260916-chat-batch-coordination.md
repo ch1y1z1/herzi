@@ -43,3 +43,11 @@
 - Web 交互优先 browser-use 后台 CDP；CUA 仅用于原生窗口/菜单/焦点等 CDP 无法覆盖的场景，foreground delivery 需再次明确授权。
 - 当前配置没有 per-worktree dev port 和 synthetic Chat 数据环境，因此本批次两个 Worker 继续只做自动/合成验证；实际浏览器验证默认在集成后由 Integrator 串行执行。
 - 若后续要求 Worker 实测，先为其分配独占测试租约、隔离端口、synthetic session/fixture，以及其自行创建和清理的 tab/window；不得并发争用用户的本地浏览器或现有 dev server。
+
+## Worker A 阶段性集成
+
+- 用户通知 `herzi_links` 已完成后，Integrator 确认 Agent 为 `idle`、worktree clean，分支包含 `ee77e0b`（实现）和 `eaf19a5`（任务记录）。
+- 修改范围检查通过：只涉及 Worker A 任务记录、Markdown link renderer/测试、共享 Markdown 配置和样式；未触碰 Worker B 范围。
+- 两个 commit 无冲突 cherry-pick 到 integration branch，生成 `7cee417`、`cea7125`。
+- 集成态验证：目标测试 7/7 PASS、`npm run typecheck` PASS、`npm run build` PASS；完整 `npm test` 待 Worker B 集成后统一运行。
+- 真实浏览器验收仍为 `NOT RUN`；Worker A worktree/branch 保留，不清理，不合入或推送 `main`。
