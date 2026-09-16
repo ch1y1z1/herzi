@@ -26,3 +26,7 @@
 - Integrator 确认两个 Worker 进入 `working` 后停止等待并把控制交还用户。
 - 用户可直接在 Worker Pane 中交互；Worker 的问题和决策点直接由用户处理。
 - Worker 完成后由用户手动通知 Integrator；在此之前 Integrator 不轮询、不读取 Worker 输出、不开始集成。
+
+## 创建记录
+
+- 首次尝试以 linked integration workspace `wX` 作为 `worktree create --workspace` 来源，Herdr 0.8.2 返回 `linked_worktree_source`；按该版本要求改用父仓库 workspace `wW` 后，两个 Worker worktree 创建成功。未产生失败的 checkout 或 branch。
