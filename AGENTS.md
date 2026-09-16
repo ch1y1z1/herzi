@@ -39,7 +39,9 @@
 
 ## 5. 验证与诚实报告
 
-- Worker 运行与改动直接相关的最小有效检查；Integrator 在合并态默认运行：
+- Worker 可以在自己的 worktree 中运行目标测试、`npm run typecheck` 和 `npm run build`；缺少依赖时使用锁文件执行 `npm ci`，不修改依赖版本。
+- Worker 默认不得运行 `npm run dev`：当前 server/Vite 固定使用 3030/5173，多个 worktree 会端口冲突或连到错误后端。只有用户或 Integrator 分配独占运行时和明确的隔离端口后才可启动。
+- Integrator 在合并态默认运行：
   - `npm run typecheck`
   - `npm test`
   - `npm run build`

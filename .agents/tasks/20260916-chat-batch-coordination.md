@@ -30,3 +30,9 @@
 ## 创建记录
 
 - 首次尝试以 linked integration workspace `wX` 作为 `worktree create --workspace` 来源，Herdr 0.8.2 返回 `linked_worktree_source`；按该版本要求改用父仓库 workspace `wW` 后，两个 Worker worktree 创建成功。未产生失败的 checkout 或 branch。
+
+## Worktree 测试约定
+
+- Worker 可在各自 worktree 中运行目标测试、`npm run typecheck` 和 `npm run build`；若 `node_modules` 不存在，按锁文件执行 `npm ci`。
+- 当前不允许两个 Worker 运行 `npm run dev`：server 固定监听 3030，Vite 固定监听 5173 且 proxy 指向 3030，无法保证 per-worktree 隔离。
+- 当前批次的真实 UI/交互验证由 Integrator 在代码集成后串行执行；若端口被现有实例占用，再向用户请求独占运行环境或先实现可配置端口。
