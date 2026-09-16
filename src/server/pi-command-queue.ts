@@ -34,11 +34,39 @@ interface PollWaiter {
   onAbort?: () => void;
 }
 
+export type PiCommandLifecyclePhase =
+  | "queue.enqueued"
+  | "queue.claimed"
+  | "queue.dispatched"
+  | "queue.failed"
+  | "queue.expired";
+
+/**
+ * Metadata-only lifecycle signal for one queued Pi bridge command. The raw
+ * bridge error text is intentionally not part of this shape: prompt bodies and
+ * model errors must never reach the delivery trace, only a stable error code.
+ */
+export interface PiCommandLifecycleEvent {
+  phase: PiCommandLifecyclePhase;
+  requestId: string;
+  paneId: string;
+  commandId: string;
+  /** Milliseconds elapsed since the command was enqueued. */
+  latencyMs: number;
+  queueStatus: "queued" | "claimed" | "dispatched" | "failed";
+  /** Stable code for failed acknowledgements; never the raw error message. */
+  errorCode?: string;
+}
+
 export class PiCommandQueue {
   private presence = new Map<string, BridgePresence>();
   private commands = new Map<string, QueuedCommand>();
   private requestCommands = new Map<string, string>();
   private waiters = new Map<string, Set<PollWaiter>>();
+
+  constructor(
+    private readonly onLifecycle?: (event: PiCommandLifecycleEvent) => void,
+  ) {}
 
   touch(identity: BridgeIdentity): void {
     this.presence.set(identity.paneId, { ...identity, lastSeen: Date.now() });
@@ -80,6 +108,7 @@ export class PiCommandQueue {
       status: "queued",
     });
     this.requestCommands.set(input.requestId, command.id);
+    this.emitLifecycle(command.id, "queue.enqueued", "queued");
     this.deliverWaiting(input.paneId);
     return command;
   }
@@ -127,6 +156,12 @@ export class PiCommandQueue {
     }
     queued.status = status;
     queued.error = error?.slice(0, 500);
+    this.emitLifecycle(
+      commandId,
+      status === "dispatched" ? "queue.dispatched" : "queue.failed",
+      status,
+      status === "failed" ? "bridge-failed" : undefined,
+    );
     return true;
   }
 
@@ -147,6 +182,9 @@ export class PiCommandQueue {
     }
     for (const [commandId, queued] of this.commands) {
       if (now - queued.createdAt <= COMMAND_TTL_MS) continue;
+      if (queued.status === "queued" || queued.status === "claimed") {
+        this.emitLifecycle(commandId, "queue.expired", queued.status);
+      }
       this.commands.delete(commandId);
       if (this.requestCommands.get(queued.command.requestId) === commandId) {
         this.requestCommands.delete(queued.command.requestId);
@@ -172,10 +210,34 @@ export class PiCommandQueue {
       ) {
         queued.status = "claimed";
         queued.claimedBy = identity.runtimeId;
+        this.emitLifecycle(queued.command.id, "queue.claimed", "claimed");
         return queued.command;
       }
     }
     return null;
+  }
+
+  private emitLifecycle(
+    commandId: string,
+    phase: PiCommandLifecyclePhase,
+    queueStatus: PiCommandLifecycleEvent["queueStatus"],
+    errorCode?: string,
+  ): void {
+    const queued = this.commands.get(commandId);
+    if (!queued) return;
+    try {
+      this.onLifecycle?.({
+        phase,
+        requestId: queued.command.requestId,
+        paneId: queued.paneId,
+        commandId,
+        latencyMs: Math.max(0, Date.now() - queued.createdAt),
+        queueStatus,
+        ...(errorCode ? { errorCode } : {}),
+      });
+    } catch {
+      // Delivery tracing must never break the queue itself.
+    }
   }
 
   private deliverWaiting(paneId: string): void {

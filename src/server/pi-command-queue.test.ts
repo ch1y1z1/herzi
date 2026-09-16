@@ -1,6 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
-import { PiCommandQueue, parseBridgeIdentity } from "./pi-command-queue.js";
+import {
+  PiCommandQueue,
+  parseBridgeIdentity,
+  type PiCommandLifecycleEvent,
+} from "./pi-command-queue.js";
 
 const identity = {
   paneId: "pane-1",
@@ -89,6 +93,115 @@ describe("PiCommandQueue", () => {
     expect(
       queue.ack({ ...identity, runtimeId: "runtime-2" }, command.id, "dispatched"),
     ).toBe(false);
+    queue.stop();
+  });
+});
+
+describe("PiCommandQueue lifecycle tracing", () => {
+  it("reports enqueue, claim, dispatch and expiry without leaking the error text", async () => {
+    const lifecycle: PiCommandLifecycleEvent[] = [];
+    const queue = new PiCommandQueue((event) => lifecycle.push(event));
+    queue.touch(identity);
+
+    const command = queue.enqueue({
+      paneId: identity.paneId,
+      sessionPath: identity.sessionPath,
+      requestId: "request-1",
+      text: "review",
+      images: [image],
+    });
+    expect(lifecycle.map((event) => event.phase)).toEqual(["queue.enqueued"]);
+    expect(lifecycle[0].latencyMs).toBeGreaterThanOrEqual(0);
+
+    await queue.poll(identity);
+    expect(lifecycle.map((event) => event.phase)).toEqual([
+      "queue.enqueued",
+      "queue.claimed",
+    ]);
+    expect(lifecycle[1]).toMatchObject({
+      requestId: "request-1",
+      paneId: identity.paneId,
+      commandId: command.id,
+      queueStatus: "claimed",
+    });
+
+    queue.ack(identity, command.id, "dispatched");
+    expect(lifecycle.at(-1)).toMatchObject({
+      phase: "queue.dispatched",
+      queueStatus: "dispatched",
+    });
+    queue.stop();
+  });
+
+  it("records a bridge failure as a stable code only", async () => {
+    const lifecycle: PiCommandLifecycleEvent[] = [];
+    const queue = new PiCommandQueue((event) => lifecycle.push(event));
+    queue.touch(identity);
+    const command = queue.enqueue({
+      paneId: identity.paneId,
+      sessionPath: identity.sessionPath,
+      requestId: "request-1",
+      text: "review",
+      images: [image],
+    });
+    await queue.poll(identity);
+
+    queue.ack(identity, command.id, "failed", "model said: SECRET PROMPT ECHO");
+
+    const failed = lifecycle.at(-1);
+    expect(failed).toMatchObject({
+      phase: "queue.failed",
+      queueStatus: "failed",
+      errorCode: "bridge-failed",
+    });
+    expect(JSON.stringify(failed)).not.toContain("SECRET");
+    queue.stop();
+  });
+
+  it("expires commands that are never claimed or never acknowledged", async () => {
+    vi.useFakeTimers();
+    try {
+      const lifecycle: PiCommandLifecycleEvent[] = [];
+      const queue = new PiCommandQueue((event) => lifecycle.push(event));
+      queue.touch({ ...identity, sessionPath: "/session/other.jsonl" });
+
+      queue.enqueue({
+        paneId: identity.paneId,
+        sessionPath: "/session/other.jsonl",
+        requestId: "request-queued",
+        text: "review",
+        images: [image],
+      });
+      vi.advanceTimersByTime(61_000);
+      queue.cleanup();
+
+      expect(lifecycle.map((event) => event.phase)).toEqual([
+        "queue.enqueued",
+        "queue.expired",
+      ]);
+      expect(lifecycle.at(-1)).toMatchObject({
+        requestId: "request-queued",
+        queueStatus: "queued",
+        latencyMs: 61_000,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("ignores a lifecycle observer that throws", () => {
+    const queue = new PiCommandQueue(() => {
+      throw new Error("observer exploded");
+    });
+    expect(() =>
+      queue.enqueue({
+        paneId: identity.paneId,
+        sessionPath: identity.sessionPath,
+        requestId: "request-1",
+        text: "review",
+        images: [image],
+      }),
+    ).not.toThrow();
     queue.stop();
   });
 });

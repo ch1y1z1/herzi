@@ -20,14 +20,26 @@ import {
   ChevronRight,
   CircleAlert,
   Clock3,
+  Copy,
   LoaderCircle,
+  RefreshCw,
   Square,
   Wrench,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+} from "react";
 
 import { apiFetch } from "../api";
 import { markdownShared } from "../markdownPlugins";
+import { createPromptDeliveryTrace } from "../promptDeliveryTrace";
 import {
   ChatImagePart,
   ComposerAddImage,
@@ -42,6 +54,10 @@ import type {
   ChatRealtimeState,
   ChatSnapshot,
   PaneSummary,
+  PromptDeliveryEvent,
+  PromptDeliveryStatus,
+  PromptQueueStatus,
+  PromptTransport,
 } from "../../shared/protocol";
 
 type ActivityItem =
@@ -69,22 +85,134 @@ interface ActivityGroupData {
   items: ActivityItem[];
 }
 
-type DisplayPart = ChatPart | { type: "data-activity"; data: ActivityGroupData };
+type DisplayPart =
+  | ChatPart
+  | { type: "data-activity"; data: ActivityGroupData }
+  | { type: "data-delivery"; data: DeliveryPartData };
+
+type PendingDeliveryState =
+  | "sending"
+  | "queued"
+  | "claimed"
+  | "sent"
+  | "unconfirmed"
+  | "failed";
+
+interface PendingDelivery {
+  state: PendingDeliveryState;
+  requestId: string;
+  /** 1-based; manual retries increment it and use a fresh request id. */
+  attempt: number;
+  error?: string;
+  transport?: PromptTransport;
+  /** Expiry of the server-side image uploads kept for a manual retry. */
+  imageExpiresAt?: number;
+  updatedAt: number;
+}
 
 interface DisplayMessage extends Omit<ChatMessage, "content"> {
   content: DisplayPart[];
+  delivery?: PendingDelivery;
 }
 
 interface PendingUserMessage extends ChatMessage {
   authoritativeOccurrence: number;
+  delivery: PendingDelivery;
+}
+
+interface DeliveryPartData {
+  messageId: string;
+  state: PendingDeliveryState;
+  requestId: string;
+  attempt: number;
+  error?: string;
+  transport?: PromptTransport;
+  imageExpiresAt?: number;
+}
+
+interface PromptDeliveryActionsState {
+  retry: (messageId: string) => void;
+  copy: (messageId: string) => void;
+  copiedMessageId: string | null;
+}
+
+/**
+ * assistant-ui renders the thread from serializable message data, so the actions
+ * for a failed bubble are shared through a context instead of being embedded in
+ * the message parts.
+ */
+const PromptDeliveryActionsContext =
+  createContext<PromptDeliveryActionsState | null>(null);
+
+function deliveryTraceStatus(state: PendingDeliveryState): PromptDeliveryStatus {
+  switch (state) {
+    case "queued":
+      return "queued";
+    case "claimed":
+      return "claimed";
+    case "sent":
+      return "submitted";
+    case "unconfirmed":
+      return "delivery-unconfirmed";
+    case "failed":
+      return "failed";
+    default:
+      return "submitted";
+  }
+}
+
+function deliveryTraceStatusForQueue(status: PromptQueueStatus): PromptDeliveryStatus {
+  switch (status) {
+    case "queued":
+      return "queued";
+    case "claimed":
+      return "claimed";
+    case "dispatched":
+      return "dispatched";
+    default:
+      return "failed";
+  }
+}
+
+function pendingStateForQueuePhase(
+  phase: PromptDeliveryEvent["phase"],
+): PendingDeliveryState | null {
+  switch (phase) {
+    case "queue.claimed":
+      return "claimed";
+    case "queue.dispatched":
+      return "sent";
+    case "queue.failed":
+      return "failed";
+    case "queue.expired":
+      return "unconfirmed";
+    default:
+      return null;
+  }
+}
+
+const DELIVERY_LABELS: Record<PendingDeliveryState, string> = {
+  sending: "正在发送…",
+  queued: "等待 Pi 接收…",
+  claimed: "Pi 已接收，正在写入会话…",
+  sent: "已送达",
+  unconfirmed: "未确认送达",
+  failed: "未送达",
+};
+
+function shortRequestId(requestId: string): string {
+  return requestId.length > 8 ? requestId.slice(0, 8) : requestId;
 }
 
 export function ChatView({
   pane,
   realtime,
+  deliveryEvents,
 }: {
   pane: PaneSummary;
   realtime?: ChatRealtimeState;
+  /** Live Pi bridge command queue status for this pane (WS push). */
+  deliveryEvents?: PromptDeliveryEvent[];
 }) {
   const [chat, setChat] = useState<ChatSnapshot>({
     paneId: pane.id,
@@ -97,8 +225,19 @@ export function ChatView({
   >([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  /**
+   * Delivery failures are tracked separately from `error` because the 1.5s chat
+   * poll resets `error` on every successful load, which used to erase the only
+   * visible trace of a failed prompt.
+   */
+  const [deliveryError, setDeliveryError] = useState<
+    { message: string; requestId: string } | null
+  >(null);
+  const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
   const [lastTransport, setLastTransport] = useState<"host-path" | "pi-native" | null>(null);
   const acknowledgedDoneRef = useRef(false);
+  const reconciledRef = useRef(new Set<string>());
+  const appliedDeliveryEventsRef = useRef(new Set<string>());
   const imageAttachmentAdapter = useMemo(
     () => new HerziImageAttachmentAdapter(pane.id),
     [pane.id],
@@ -114,7 +253,11 @@ export function ChatView({
     setPendingUserMessages([]);
     setLoading(true);
     setError("");
+    setDeliveryError(null);
+    setCopiedMessageId(null);
     setLastTransport(null);
+    reconciledRef.current = new Set();
+    appliedDeliveryEventsRef.current = new Set();
     acknowledgedDoneRef.current = false;
   }, [pane.id]);
 
@@ -211,10 +354,208 @@ export function ChatView({
     });
   }, [authoritativeMessages]);
 
+  /**
+   * A pending bubble may only disappear because the authoritative transcript now
+   * contains the same user message. The correlation id of that transition is what
+   * closes the lifecycle trace on the client side.
+   */
+  useEffect(() => {
+    const matched = pendingUserMessages.filter(
+      (item) =>
+        countUserMessages(authoritativeMessages, userMessageFingerprint(item)) >
+        item.authoritativeOccurrence,
+    );
+    const fresh = matched.filter((item) => !reconciledRef.current.has(item.id));
+    if (fresh.length === 0) return;
+
+    for (const item of fresh) {
+      reconciledRef.current.add(item.id);
+      createPromptDeliveryTrace({
+        paneId: pane.id,
+        requestId: item.delivery.requestId,
+        attempt: item.delivery.attempt,
+      }).record("client.reconciliation", {
+        status: deliveryTraceStatus(item.delivery.state),
+        latencyMs: Math.max(0, Date.now() - item.createdAt),
+        ...(item.delivery.transport ? { transport: item.delivery.transport } : {}),
+      });
+      setDeliveryError((current) =>
+        current?.requestId === item.delivery.requestId ? null : current,
+      );
+    }
+  }, [authoritativeMessages, pane.id, pendingUserMessages]);
+
+  /**
+   * Queue lifecycle pushes from the server. The Pi-native transport answers
+   * `queued` before the bridge command is claimed, so without these events an
+   * "HTTP 200" could hide a prompt that was never delivered.
+   */
+  useEffect(() => {
+    if (!deliveryEvents?.length) return;
+
+    for (const event of deliveryEvents) {
+      if (event.paneId !== pane.id) continue;
+      const key = `${event.requestId}:${event.seq ?? event.at}`;
+      if (appliedDeliveryEventsRef.current.has(key)) continue;
+      appliedDeliveryEventsRef.current.add(key);
+      if (appliedDeliveryEventsRef.current.size > 400) {
+        appliedDeliveryEventsRef.current = new Set([key]);
+      }
+
+      const nextState = pendingStateForQueuePhase(event.phase);
+      if (!nextState) continue;
+
+      createPromptDeliveryTrace({
+        paneId: pane.id,
+        requestId: event.requestId,
+      }).record("client.delivery-status", {
+        status: event.status ?? deliveryTraceStatusForQueue(event.queueStatus ?? "queued"),
+        ...(event.queueStatus ? { queueStatus: event.queueStatus } : {}),
+        ...(event.transport ? { transport: event.transport } : {}),
+        ...(event.latencyMs !== undefined ? { latencyMs: event.latencyMs } : {}),
+      });
+
+      setPendingUserMessages((current) =>
+        current.map((item) =>
+          item.delivery.requestId === event.requestId
+            ? {
+                ...item,
+                delivery: {
+                  ...item.delivery,
+                  state: nextState,
+                  updatedAt: Date.now(),
+                  ...(nextState === "failed"
+                    ? { error: "Pi bridge 报告投递失败，这条消息没有进入会话" }
+                    : {}),
+                  ...(nextState === "unconfirmed"
+                    ? { error: "未收到 Pi 的投递回执，会话中可能没有这条消息" }
+                    : {}),
+                },
+              }
+            : item,
+        ),
+      );
+
+      if (nextState === "failed" || nextState === "unconfirmed") {
+        setDeliveryError({
+          message: `${DELIVERY_LABELS[nextState]}：requestId ${shortRequestId(event.requestId)}`,
+          requestId: event.requestId,
+        });
+      }
+    }
+  }, [deliveryEvents, pane.id]);
+
   const running = realtime ? realtime.status !== "idle" : chat.running;
   const displayMessages = useMemo(
     () => groupAssistantTurns(messages, running),
     [messages, running],
+  );
+
+  const updatePendingDelivery = useCallback(
+    (messageId: string, patch: Partial<PendingDelivery>) => {
+      setPendingUserMessages((current) =>
+        current.map((item) =>
+          item.id === messageId
+            ? { ...item, delivery: { ...item.delivery, ...patch } }
+            : item,
+        ),
+      );
+    },
+    [],
+  );
+
+  /**
+   * Posts one delivery attempt and always resolves: failures are surfaced in the
+   * thread instead of silently dropping the optimistic message, and nothing is
+   * retried automatically (a double send is worse than a visible failure).
+   */
+  const deliverPrompt = useCallback(
+    async (input: {
+      messageId: string;
+      requestId: string;
+      attempt: number;
+      text: string;
+      uploadIds: string[];
+    }) => {
+      const trace = createPromptDeliveryTrace({
+        paneId: pane.id,
+        requestId: input.requestId,
+        attempt: input.attempt,
+      });
+      try {
+        const response = await apiFetch(
+          `/api/panes/${encodeURIComponent(pane.id)}/prompt`,
+          {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              requestId: input.requestId,
+              text: input.text,
+              attachments: input.uploadIds.map((uploadId) => ({ uploadId })),
+            }),
+          },
+        );
+        const body = (await response.json().catch(() => null)) as
+          | {
+              error?: string;
+              transport?: PromptTransport;
+              status?: PromptDeliveryStatus;
+            }
+          | null;
+
+        if (!response.ok) {
+          const message = body?.error ?? `Prompt failed (${response.status})`;
+          trace.record("client.error", {
+            httpStatus: response.status,
+            errorCode: `http-${response.status}`,
+            errorClass: "PromptRequestError",
+          });
+          updatePendingDelivery(input.messageId, {
+            state: "failed",
+            error: message,
+            updatedAt: Date.now(),
+          });
+          setDeliveryError({
+            message: `${message}（requestId ${shortRequestId(input.requestId)}）`,
+            requestId: input.requestId,
+          });
+          return;
+        }
+
+        trace.record("client.response", {
+          httpStatus: response.status,
+          ...(body?.transport ? { transport: body.transport } : {}),
+          ...(body?.status ? { status: body.status } : {}),
+        });
+        updatePendingDelivery(input.messageId, {
+          state: body?.status === "queued" ? "queued" : "sent",
+          ...(body?.transport ? { transport: body.transport } : {}),
+          updatedAt: Date.now(),
+        });
+        setDeliveryError(null);
+        if (body?.transport === "host-path" || body?.transport === "pi-native") {
+          setLastTransport(body.transport);
+        }
+        window.setTimeout(() => void loadChat(), 250);
+      } catch (submitError) {
+        const message =
+          submitError instanceof Error ? submitError.message : "发送失败";
+        trace.record("client.error", {
+          errorCode: "client-transport-error",
+          errorClass: errorClassName(submitError),
+        });
+        updatePendingDelivery(input.messageId, {
+          state: "failed",
+          error: message,
+          updatedAt: Date.now(),
+        });
+        setDeliveryError({
+          message: `${message}（requestId ${shortRequestId(input.requestId)}）`,
+          requestId: input.requestId,
+        });
+      }
+    },
+    [loadChat, pane.id, updatePendingDelivery],
   );
 
   const onNew = useCallback(
@@ -241,6 +582,14 @@ export function ChatView({
           sha256: upload.sha256,
         })),
       ];
+      const requestId = crypto.randomUUID();
+      const attempt = 1;
+      const imageExpiresAt = uploadedImages.length
+        ? Math.min(...uploadedImages.map((upload) => upload.expiresAt))
+        : undefined;
+      const trace = createPromptDeliveryTrace({ paneId: pane.id, requestId, attempt });
+      trace.record("client.submit");
+
       const optimisticMessage: ChatMessage = {
         id: `optimistic:${pane.id}:${crypto.randomUUID()}`,
         role: "user",
@@ -258,45 +607,97 @@ export function ChatView({
           countUserMessages(unmatched, fingerprint);
         return [
           ...unmatched,
-          { ...optimisticMessage, authoritativeOccurrence },
+          {
+            ...optimisticMessage,
+            authoritativeOccurrence,
+            delivery: {
+              state: "sending",
+              requestId,
+              attempt,
+              updatedAt: Date.now(),
+              ...(imageExpiresAt ? { imageExpiresAt } : {}),
+            },
+          },
         ];
       });
+      trace.record("client.optimistic");
 
+      await deliverPrompt({
+        messageId: optimisticMessage.id,
+        requestId,
+        attempt,
+        text,
+        uploadIds: uploadedImages.map((upload) => upload.uploadId),
+      });
+    },
+    [authoritativeMessages, deliverPrompt, imageAttachmentAdapter, pane.id],
+  );
+
+  const retryPendingMessage = useCallback(
+    async (messageId: string) => {
+      const pending = pendingUserMessages.find((item) => item.id === messageId);
+      if (!pending) return;
+
+      // A manual retry is a new attempt with a new request id: reusing the old id
+      // would be deduplicated by the Pi command queue and silently do nothing.
+      const requestId = crypto.randomUUID();
+      const attempt = pending.delivery.attempt + 1;
+      createPromptDeliveryTrace({ paneId: pane.id, requestId, attempt }).record(
+        "client.retry",
+      );
+      updatePendingDelivery(messageId, {
+        state: "sending",
+        requestId,
+        attempt,
+        error: undefined,
+        updatedAt: Date.now(),
+      });
+      setDeliveryError(null);
+
+      await deliverPrompt({
+        messageId,
+        requestId,
+        attempt,
+        text: messageText(pending),
+        uploadIds: messageUploadIds(pending),
+      });
+    },
+    [deliverPrompt, pane.id, pendingUserMessages, updatePendingDelivery],
+  );
+
+  const copyPendingMessage = useCallback(
+    async (messageId: string) => {
+      const pending = pendingUserMessages.find((item) => item.id === messageId);
+      if (!pending) return;
       try {
-        const requestId = crypto.randomUUID();
-        const response = await apiFetch(
-          `/api/panes/${encodeURIComponent(pane.id)}/prompt`,
-          {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({
-              requestId,
-              text,
-              attachments: uploadedImages.map((upload) => ({
-                uploadId: upload.uploadId,
-              })),
-            }),
-          },
+        await navigator.clipboard.writeText(messageText(pending));
+        setCopiedMessageId(messageId);
+        window.setTimeout(
+          () =>
+            setCopiedMessageId((current) =>
+              current === messageId ? null : current,
+            ),
+          1_500,
         );
-        const body = (await response.json().catch(() => null)) as
-          | { error?: string; transport?: "text" | "host-path" | "pi-native" }
-          | null;
-        if (!response.ok) {
-          throw new Error(body?.error ?? `Prompt failed (${response.status})`);
-        }
-        if (body?.transport === "host-path" || body?.transport === "pi-native") {
-          setLastTransport(body.transport);
-        }
-        window.setTimeout(() => void loadChat(), 250);
-      } catch (submitError) {
-        setPendingUserMessages((current) =>
-          current.filter((item) => item.id !== optimisticMessage.id),
-        );
-        throw submitError;
+      } catch {
+        setDeliveryError({
+          message: "复制失败，请手动选择消息内容",
+          requestId: pending.delivery.requestId,
+        });
       }
     },
-    [authoritativeMessages, imageAttachmentAdapter, loadChat, pane.id],
+    [pendingUserMessages],
   );
+
+  const deliveryActions = useMemo<PromptDeliveryActionsState>(
+    () => ({
+      retry: (messageId) => void retryPendingMessage(messageId),
+      copy: (messageId) => void copyPendingMessage(messageId),
+      copiedMessageId,
+    }),
+    [copiedMessageId, copyPendingMessage, retryPendingMessage],
+  );
+
 
   const runtime = useExternalStoreRuntime<DisplayMessage>({
     messages: displayMessages,
@@ -329,12 +730,14 @@ export function ChatView({
             </div>
           </ThreadPrimitive.Empty>
 
-          <ThreadPrimitive.Messages
-            components={{
-              UserMessage,
-              AssistantMessage,
-            }}
-          />
+          <PromptDeliveryActionsContext.Provider value={deliveryActions}>
+            <ThreadPrimitive.Messages
+              components={{
+                UserMessage,
+                AssistantMessage,
+              }}
+            />
+          </PromptDeliveryActionsContext.Provider>
 
           {running && (
             <div className="agent-working" role="status" aria-live="polite">
@@ -351,6 +754,12 @@ export function ChatView({
               <div className="chat-error">
                 <CircleAlert size={14} />
                 {error}
+              </div>
+            )}
+            {deliveryError && (
+              <div className="chat-error" role="alert">
+                <CircleAlert size={14} />
+                {deliveryError.message}
               </div>
             )}
             <ComposerPrimitive.Root className="chat-composer">
@@ -401,11 +810,85 @@ function UserMessage() {
           components={{
             Text: UserText,
             Image: ChatImagePart,
+            data: { by_name: { delivery: UserDeliveryStatus } },
           }}
         />
       </div>
     </MessagePrimitive.Root>
   );
+}
+
+const deliveryActionButtonStyle: CSSProperties = {
+  display: "inline-flex",
+  alignItems: "center",
+  gap: 4,
+  padding: "2px 8px",
+  border: "1px solid #ddc7c3",
+  borderRadius: 999,
+  color: "#a5534e",
+  background: "#fff",
+  fontSize: 11,
+  cursor: "pointer",
+};
+
+/**
+ * Rendered inside a pending user bubble. The message itself is never removed on
+ * failure: it keeps its text, image previews and request id so the user can see
+ * exactly what happened and manually resend it.
+ */
+function UserDeliveryStatus({ data }: DataMessagePartProps<DeliveryPartData>) {
+  const actions = useContext(PromptDeliveryActionsContext);
+  const info = data as DeliveryPartData;
+  const actionable = info.state === "failed" || info.state === "unconfirmed";
+  const imageHint = deliveryImageHint(info);
+
+  return (
+    <div className={`user-delivery ${info.state}`} role="status">
+      <span className="user-delivery-line">
+        {info.state === "sending" ? (
+          <LoaderCircle className="spin" size={12} aria-hidden="true" />
+        ) : info.state === "failed" || info.state === "unconfirmed" ? (
+          <CircleAlert size={12} aria-hidden="true" />
+        ) : (
+          <Clock3 size={12} aria-hidden="true" />
+        )}
+        <span>{DELIVERY_LABELS[info.state]}</span>
+        <span className="user-delivery-request">
+          requestId {shortRequestId(info.requestId)}
+          {info.attempt > 1 ? ` · 第 ${info.attempt} 次尝试` : ""}
+        </span>
+      </span>
+      {info.error && <span className="user-delivery-error">{info.error}</span>}
+      {imageHint && <span className="user-delivery-hint">{imageHint}</span>}
+      {actionable && actions && (
+        <span className="user-delivery-actions">
+          <button
+            type="button"
+            style={deliveryActionButtonStyle}
+            onClick={() => actions.retry(info.messageId)}
+          >
+            <RefreshCw size={11} aria-hidden="true" />
+            重试
+          </button>
+          <button
+            type="button"
+            style={deliveryActionButtonStyle}
+            onClick={() => actions.copy(info.messageId)}
+          >
+            <Copy size={11} aria-hidden="true" />
+            {actions.copiedMessageId === info.messageId ? "已复制" : "复制内容"}
+          </button>
+        </span>
+      )}
+    </div>
+  );
+}
+
+function deliveryImageHint(info: DeliveryPartData): string | null {
+  if (!info.imageExpiresAt) return null;
+  const remainingMs = info.imageExpiresAt - Date.now();
+  if (remainingMs <= 0) return "图片附件已过期，请重新粘贴后再发送";
+  return `图片附件仍可重发（约 ${Math.max(1, Math.round(remainingMs / 60_000))} 分钟后过期）`;
 }
 
 function AssistantMessage() {
@@ -997,6 +1480,26 @@ function userMessageFingerprint(message: ChatMessage): string {
   return JSON.stringify({ text, images });
 }
 
+function messageText(message: ChatMessage): string {
+  return message.content
+    .filter((part): part is Extract<ChatPart, { type: "text" }> => part.type === "text")
+    .map((part) => part.text)
+    .join("\n")
+    .trim();
+}
+
+function messageUploadIds(message: ChatMessage): string[] {
+  return message.content
+    .filter((part): part is Extract<ChatPart, { type: "image" }> => part.type === "image")
+    .map((part) => part.uploadId)
+    .filter((uploadId): uploadId is string => Boolean(uploadId));
+}
+
+function errorClassName(error: unknown): string {
+  const name = error instanceof Error && error.name ? error.name : typeof error;
+  return name.replace(/[^A-Za-z0-9._-]/g, "-").slice(0, 64) || "unknown";
+}
+
 function imageCapabilityLabel(
   realtime: ChatRealtimeState | undefined,
   lastTransport: "host-path" | "pi-native" | null,
@@ -1026,9 +1529,37 @@ function convertMessage(message: DisplayMessage): ThreadMessageLike {
     id: message.id,
     role: message.role,
     createdAt: new Date(message.createdAt),
-    content: message.content,
+    content: withDeliveryStatusPart(message),
     ...(message.role === "assistant" && message.status
       ? { status: message.status }
       : {}),
   };
+}
+
+/**
+ * Adds the delivery status row to a pending user message. `sent` needs no row;
+ * every other state tells the user whether the prompt actually left the browser.
+ */
+function withDeliveryStatusPart(message: DisplayMessage): DisplayPart[] {
+  const delivery = message.delivery;
+  if (message.role !== "user" || !delivery || delivery.state === "sent") {
+    return message.content;
+  }
+  return [
+    ...message.content,
+    {
+      type: "data-delivery",
+      data: {
+        messageId: message.id,
+        state: delivery.state,
+        requestId: delivery.requestId,
+        attempt: delivery.attempt,
+        ...(delivery.error ? { error: delivery.error } : {}),
+        ...(delivery.transport ? { transport: delivery.transport } : {}),
+        ...(delivery.imageExpiresAt
+          ? { imageExpiresAt: delivery.imageExpiresAt }
+          : {}),
+      },
+    },
+  ];
 }

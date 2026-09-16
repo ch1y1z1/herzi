@@ -605,3 +605,30 @@ npm start
 - 随后执行只读 `pi list` 验证，用户 package 列表已包含 `../../agent_workspace/herzi/integrations/pi`，解析路径为当前仓库 `/Users/chiyizi/agent_workspace/herzi/integrations/pi`。
 - 该安装登记项目本地 package 路径；后续启动的 Pi 进程会自动加载 bridge v2。安装前已经运行的 Pi 不会热加载新 package，需在目标会话执行 `/reload` 或重启 Pi。
 - 本轮没有代用户向任何已有 Pi Pane 发送 `/reload` 或 prompt，也没有重启当前 3030 Herzi server；真实图片输入还要求 Herzi server 运行包含 image endpoints/command queue 的新构建。
+
+## 2026-09-16：Prompt 投递可观测性与无声丢失保护
+
+### 本轮目标
+
+- 建立从 composer Enter 到 authoritative reconciliation 的 requestId 关联投递日志；
+- 消除“prompt 请求失败后 optimistic 消息被撤回、用户看不到任何错误”的风险；
+- 不重写 Chat 架构、不自动重试（避免双发）；真实 Pi Pane 验收留待授权环境。
+
+### 实现
+
+- `src/shared/protocol.ts`：新增 `PromptTransport`、`PromptDeliveryPhase`、`PromptDeliveryEvent`，以及 WS 消息 `{ channel: "chat"; type: "prompt-delivery" }`。
+- `src/shared/prompt-delivery.ts`（新增）：metadata-only sanitizer，只保留 allowlist 字段并做枚举/长度/数值范围约束；客户端 phase 与 server/queue phase 分属不同 allowlist。
+- `src/server/prompt-delivery-trace.ts`（新增）：有界 trace（内存 ring 2000、每 requestId 64、最多 200 个 request，LRU）+ JSONL 追加与 2 MiB 轮转 + subscribe；写失败不影响投递。
+- `src/server/pi-command-queue.ts`：新增 `PiCommandLifecycleEvent` 回调，覆盖 enqueued/claimed/dispatched/failed/expired；bridge ack 的原始错误文本只留在内存，trace 只写固定码 `bridge-failed`。
+- `src/server/index.ts`：prompt 路由记录 received/rejected/validated/transport-selected/submitted/error；新增 `POST /api/prompt-delivery/events`（客户端批量上报，token 保护）与 `GET /api/prompt-delivery?requestId=&limit=`；queue 生命周期事件按 paneId 通过 WS 广播；队列过期巡查由 30 分钟拆为独立 15s 定时器。
+- `src/web/promptDeliveryTrace.ts`（新增）：客户端 ring 200 条 + 待上报批次（上限 40、单批 20），失败退避重试后停止，全部经 sanitizer 且不抛错。
+- `src/web/components/ChatView.tsx`：新增投递状态（sending/queued/claimed/sent/unconfirmed/failed）；失败气泡保留正文、图片与 requestId，提供手动“重试”（新 requestId、attempt+1）与“复制内容”；新增独立于 `error` 的投递错误条（`error` 会被 1.5s 轮询清空）；记录 client.submit/optimistic/response/error/retry/delivery-status/reconciliation。
+- `src/web/App.tsx`：接收 WS `prompt-delivery` 事件（每 pane 保留最近 20 条）并传给 `ChatView`。
+
+### 验证
+
+- `npm run typecheck`：PASS。
+- `npm test`：PASS（10 files / 47 tests），新增 5 个测试文件覆盖 sanitizer 边界、trace 有界/轮转/订阅者异常、queue 生命周期与 TTL 过期、客户端批量上报与缓冲、ChatView 失败气泡与手动重试。
+- `npm run build`：PASS，仅保留既有 chunk size warning。
+- 未操作任何真实 Pi/Herdr Pane；真实 bridge claim/ack/expiry 在 UI 上的显示为 **NOT RUN**。
+- `src/web/styles.css` 本轮未改动（属并行 Worker 范围），投递状态按钮暂用内联样式。

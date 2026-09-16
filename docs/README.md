@@ -15,6 +15,7 @@
 | [`chat-activity-ui.md`](./chat-activity-ui.md) | 已实现 | `Worked for` 全过程折叠、thinking/tool 摘要、连续工具分组与运行状态规则 |
 | [`pi-realtime-bridge.md`](./pi-realtime-bridge.md) | 代码完成、待安装验收 | Pi companion extension、实时协议、安装方式、降级与限制 |
 | [`latex-rendering-fix.md`](./latex-rendering-fix.md) | 已实施 | Chat 中 LaTeX 公式无法渲染的根因定位、修复方案与验证记录 |
+| [`prompt-delivery-observability.md`](./prompt-delivery-observability.md) | 首轮实现完成、待真实验收 | prompt 投递 requestId 生命周期 trace、metadata-only 日志边界、失败可见性与手动恢复 |
 | [`image-paste-implementation-plan.md`](./image-paste-implementation-plan.md) | 首轮实现完成、待真实验收 | Chat 图片粘贴的现状审计、Moshi/Orca/Pi 调研、双通道架构、实际实现、测试与待验收项 |
 | [`development-log.md`](./development-log.md) | 持续维护 | 实际代码变更、运行方法、真实冒烟结果、已知限制与后续工作 |
 | [`decisions/0001-terminal-backed-local-web-mvp.md`](./decisions/0001-terminal-backed-local-web-mvp.md) | Accepted | terminal-backed、单 runtime 所有权与本地 Web MVP 架构决策 |
@@ -49,6 +50,7 @@
 - 2026-09-15 Chat 图片粘贴首轮实现完成：assistant-ui 支持粘贴/拖入/选择/预览，服务端提供受限 multipart UploadStore，Pi bridge v2 提供原生图片主通道并保留 Moshi/Pi 式宿主路径 fallback；21 项自动测试和完整构建通过，bridge 已安装，待现有进程 reload 和专用 Pi Pane 写入式验收。详见 [`image-paste-implementation-plan.md`](./image-paste-implementation-plan.md)。
 - 2026-09-15 Pi `read` 图片工具结果已支持预览：JSONL reader 保留 toolResult image content，普通工具卡和 `Worked for` activity 中的 read 行展开后显示缩略图，点击可打开 lightbox；21 项自动测试和完整构建通过。详见 [`development-log.md`](./development-log.md)。
 - 2026-09-15 已按用户要求执行 `pi install ./integrations/pi`，`pi list` 确认 bridge v2 已登记到用户 Pi packages；新 Pi 进程会自动加载，已有进程仍需 `/reload`，Herzi 3030 服务也需重启到新构建后图片输入链路才会生效。详见 [`pi-realtime-bridge.md`](./pi-realtime-bridge.md)。
+- 2026-09-16 已建立 prompt 投递的可观测性：新增 `requestId` 关联的 bounded、metadata-only trace（客户端阶段 + server 阶段 + Pi bridge queue claim/ack/expiry）、`POST/GET /api/prompt-delivery` 上报与查询、WebSocket 投递状态推送；并修复“请求失败后 optimistic 消息被撤回且无提示”的问题，改为保留失败气泡并提供手动重试/复制，不做自动重试。详见 [`prompt-delivery-observability.md`](./prompt-delivery-observability.md)。
 
 ## 记录原则
 
