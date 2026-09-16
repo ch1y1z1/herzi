@@ -36,3 +36,10 @@
 - Worker 可在各自 worktree 中运行目标测试、`npm run typecheck` 和 `npm run build`；若 `node_modules` 不存在，按锁文件执行 `npm ci`。
 - 当前不允许两个 Worker 运行 `npm run dev`：server 固定监听 3030，Vite 固定监听 5173 且 proxy 指向 3030，无法保证 per-worktree 隔离。
 - 当前批次的真实 UI/交互验证由 Integrator 在代码集成后串行执行；若端口被现有实例占用，再向用户请求独占运行环境或先实现可配置端口。
+
+## Browser Use / CUA 实测约定
+
+- 用户可以单独授权 Worker 使用 browser-use 或 CUA，但授权不等于允许共享 3030/5173、读取真实 transcript 或操作业务 Pane。
+- Web 交互优先 browser-use 后台 CDP；CUA 仅用于原生窗口/菜单/焦点等 CDP 无法覆盖的场景，foreground delivery 需再次明确授权。
+- 当前配置没有 per-worktree dev port 和 synthetic Chat 数据环境，因此本批次两个 Worker 继续只做自动/合成验证；实际浏览器验证默认在集成后由 Integrator 串行执行。
+- 若后续要求 Worker 实测，先为其分配独占测试租约、隔离端口、synthetic session/fixture，以及其自行创建和清理的 tab/window；不得并发争用用户的本地浏览器或现有 dev server。
