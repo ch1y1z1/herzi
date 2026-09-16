@@ -33,6 +33,8 @@
 - Worker 只修改约定范围，维护自己的 `.agents/tasks/<task-id>.md`，运行局部检查，并交付 commit、验证结果和未决问题。
 - Worker 不合并其他 Worker 分支，也不直接合入或推送 `main`。
 - Reviewer 仅在协议、并发、持久化、安全、隐私或较大改动中按需使用；默认只报告带文件和行号的问题。
+- Integrator 发送 Worker prompt 后，只确认 Agent 已进入 `working` 就返回控制，不持续等待完成；用户可以直接与 Worker 交互，并在 Worker 完成后手动通知 Integrator继续集成。
+- Worker 遇到问题或决策点时直接在自己的 Pane 向用户提问并等待，不通过 Integrator 代传或自行猜测。
 - 无法明确隔离修改范围时，改为串行，不增加管理层来强行并行。
 
 ## 5. 验证与诚实报告
