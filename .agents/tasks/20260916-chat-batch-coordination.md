@@ -51,3 +51,13 @@
 - 两个 commit 无冲突 cherry-pick 到 integration branch，生成 `7cee417`、`cea7125`。
 - 集成态验证：目标测试 7/7 PASS、`npm run typecheck` PASS、`npm run build` PASS；完整 `npm test` 待 Worker B 集成后统一运行。
 - 真实浏览器验收仍为 `NOT RUN`；Worker A worktree/branch 保留，不清理，不合入或推送 `main`。
+
+## 独立 Code Review 派发
+
+- 用户在 Worker B 正式集成前要求暂停，并授权创建独立 review candidate；Worker B commit `55839d5` 仍未进入 integration branch。
+- Review workspace / Pane：`w0` / `w0:p1`。
+- Review branch：`review-20260916-chat-reliability`，基于 integration commit `83f76d6`。
+- Worker B 在 review branch 中 cherry-pick 为 `39b9423`；review 任务定义 commit 为 `e82506a`。
+- Reviewer agent：`herzi_reviewer`；只允许修改 `.agents/tasks/20260916-chat-reliability-review.md`，不得修改产品代码。
+- 已发送审查 prompt，并通过 `herdr agent get herzi_reviewer` 确认状态为 `working`。
+- Integrator 现在停止等待和轮询；Reviewer 完成后由用户手动通知。期间用户可直接与 Reviewer 交互，决策点由 Reviewer 直接向用户提问。
