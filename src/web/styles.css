@@ -814,6 +814,56 @@ button {
   white-space: nowrap;
 }
 
+/* Action word + target are two columns: the action is fixed, the target is a
+   single clipped line in a monospace face (commands, paths, patterns). */
+.tool-action {
+  max-width: 45%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tool-target {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  color: #8f948c;
+  font-family: "SFMono-Regular", Menlo, monospace;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.activity-counts {
+  min-width: 0;
+  flex: 0 1 auto;
+  overflow: hidden;
+  color: #a0a49c;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tool-diff,
+.activity-diff {
+  display: inline-flex;
+  flex: 0 0 auto;
+  gap: 5px;
+  font-family: "SFMono-Regular", Menlo, monospace;
+  font-size: 11px;
+}
+
+.activity-diff {
+  margin-left: auto;
+  padding-left: 8px;
+}
+
+.diff-add {
+  color: #779268;
+}
+
+.diff-remove {
+  color: #c2635d;
+}
+
 .reasoning-detail {
   margin-top: 7px;
   padding: 0 0 0 20px;
@@ -834,7 +884,6 @@ button {
 .tool-card summary strong {
   flex: 0 0 auto;
   color: #70756d;
-  font-family: "SFMono-Regular", Menlo, monospace;
   font-weight: 500;
 }
 

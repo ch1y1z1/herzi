@@ -39,7 +39,22 @@ import {
 
 import { apiFetch } from "../api";
 import { markdownShared } from "../markdownPlugins";
+import {
+  PanelOpenScopeContext,
+  groupPanelKey,
+  reasoningPanelKey,
+  toolPanelKey,
+  usePanelOpenState,
+} from "../panelOpenState";
 import { createPromptDeliveryTrace } from "../promptDeliveryTrace";
+import {
+  describeToolCall,
+  formatToolCounts,
+  summarizeToolRun,
+  toolRunDiff,
+  toolRunVerb,
+  type ToolDiff,
+} from "../toolCatalog";
 import {
   ChatImagePart,
   ComposerAddImage,
@@ -59,9 +74,16 @@ import type {
   PromptTransport,
 } from "../../shared/protocol";
 
+type ReasoningActivityItem = {
+  type: "reasoning";
+  text: string;
+  /** Server-side approximation (decision D3); absent when unknown. */
+  durationMs?: number;
+};
+
 type ActivityItem =
   | { type: "message"; text: string }
-  | { type: "reasoning"; text: string }
+  | ReasoningActivityItem
   | { type: "image"; image: string }
   | {
       type: "tool";
@@ -76,9 +98,11 @@ type ToolActivityItem = Extract<ActivityItem, { type: "tool" }>;
 
 type ActivityRenderItem =
   | ActivityItem
-  | { type: "tool-group"; items: ToolActivityItem[] };
+  | { type: "tool-group"; id: string; items: ToolActivityItem[] };
 
 interface ActivityGroupData {
+  /** Stable identifier for the expansion state (decision D5). */
+  id: string;
   kind: "work" | "tools";
   durationMs?: number;
   items: ActivityItem[];
@@ -746,12 +770,14 @@ export function ChatView({
           </ThreadPrimitive.Empty>
 
           <PromptDeliveryActionsContext.Provider value={deliveryActions}>
-            <ThreadPrimitive.Messages
-              components={{
-                UserMessage,
-                AssistantMessage,
-              }}
-            />
+            <PanelOpenScopeContext.Provider value={pane.id}>
+              <ThreadPrimitive.Messages
+                components={{
+                  UserMessage,
+                  AssistantMessage,
+                }}
+              />
+            </PanelOpenScopeContext.Provider>
           </PromptDeliveryActionsContext.Provider>
 
           {running && (
@@ -983,45 +1009,51 @@ function AssistantText() {
   return <MarkdownTextPrimitive className="markdown-body" {...markdownShared} />;
 }
 
-function ReasoningPart({ text }: { text: string }) {
+function ReasoningPart(props: { text: string; status?: { type: string } }) {
+  const label = reasoningLabel(
+    partDurationMs(props),
+    props.status?.type === "running",
+  );
+  const [open, setOpen] = usePanelOpenState(reasoningPanelKey(props.text));
   return (
-    <details className="reasoning-block">
+    <details
+      className="reasoning-block"
+      open={open}
+      onToggle={(event) => setOpen(event.currentTarget.open)}
+    >
       <summary>
         <Brain size={14} />
-        <strong>Thinking</strong>
-        <span className="activity-preview">{shortPreview(text)}</span>
+        <strong>{label}</strong>
+        <span className="activity-preview">{shortPreview(props.text)}</span>
         <ChevronRight className="activity-chevron" size={14} />
       </summary>
-      <div className="reasoning-detail">{text}</div>
+      <div className="reasoning-detail">{props.text}</div>
     </details>
   );
 }
 
 function ToolFallback({
+  toolCallId,
   toolName,
   args,
   result,
   isError,
 }: ToolCallMessagePartProps) {
   const complete = result !== undefined;
+  const [open, setOpen] = usePanelOpenState(toolPanelKey(toolCallId));
   return (
-    <details className={`tool-card ${isError ? "tool-error" : ""}`}>
+    <details
+      className={`tool-card ${isError ? "tool-error" : ""}`}
+      open={open}
+      onToggle={(event) => setOpen(event.currentTarget.open)}
+    >
       <summary>
-        <span className="tool-icon">
-          <Wrench size={13} />
-        </span>
-        <strong>{toolName}</strong>
-        <span className="activity-preview">{toolPreview(args)}</span>
-        <span className="tool-state">
-          {isError ? (
-            <CircleAlert size={13} />
-          ) : complete ? (
-            <Check size={13} />
-          ) : (
-            <LoaderCircle className="spin" size={13} />
-          )}
-        </span>
-        <ChevronRight className="tool-chevron" size={14} />
+        <ToolRowSummary
+          toolName={toolName}
+          args={args}
+          complete={complete}
+          isError={Boolean(isError)}
+        />
       </summary>
       <div className="tool-detail">
         <ToolData label="Arguments" value={args} />
@@ -1040,6 +1072,12 @@ function ToolFallback({
 function ActivityGroup({ data }: DataMessagePartProps<ActivityGroupData>) {
   const activity = data as ActivityGroupData;
   const duration = formatDuration(activity.durationMs ?? 0);
+  const toolItems = useMemo(
+    () => activity.items.filter(isToolActivityItem),
+    [activity.items],
+  );
+  const summary = useMemo(() => summarizeToolRun(toolItems), [toolItems]);
+  const [open, setOpen] = usePanelOpenState(groupPanelKey(activity.id));
   const renderItems: ActivityRenderItem[] =
     activity.kind === "work"
       ? groupActivityTools(activity.items)
@@ -1054,27 +1092,37 @@ function ActivityGroup({ data }: DataMessagePartProps<ActivityGroupData>) {
     );
   }
 
+  // Without a single tool row there is no phase to report, so the header keeps
+  // the original duration wording instead of inventing an activity verb.
+  const hasTools = toolItems.length > 0;
+  const headerText =
+    activity.kind === "work" && !hasTools
+      ? `Worked for ${duration}`
+      : toolRunVerb(summary);
+  const countsText = hasTools ? formatToolCounts(summary.counts) : "";
+  const diff = toolRunDiff(summary);
+
   return (
-    <details className={`activity-group ${activity.kind === "work" ? "work-group" : "tool-group"}`}>
-      <summary>
+    <details
+      className={`activity-group ${activity.kind === "work" ? "work-group" : "tool-group"}`}
+      open={open}
+      onToggle={(event) => setOpen(event.currentTarget.open)}
+    >
+      <summary
+        title={
+          activity.kind === "work" ? `Worked for ${duration}` : toolNameList(toolItems)
+        }
+      >
         {activity.kind === "work" ? <Clock3 size={14} /> : <Wrench size={14} />}
-        <strong>
-          {activity.kind === "work"
-            ? `Worked for ${duration}`
-            : `Ran ${activity.items.length} tools`}
-        </strong>
-        {activity.kind === "tools" && (
-          <span className="activity-preview">{toolGroupPreview(activity.items)}</span>
-        )}
+        <strong className="activity-verb">{headerText}</strong>
+        {countsText && <span className="activity-counts">{countsText}</span>}
+        {diff && <ToolDiffText className="activity-diff" diff={diff} />}
         <ChevronRight className="activity-chevron" size={14} />
       </summary>
       <div className="activity-list">
         {renderItems.map((item, index) =>
           item.type === "tool-group" ? (
-            <ActivityToolGroup
-              key={`tool-group-${item.items[0]?.toolCallId ?? index}`}
-              items={item.items}
-            />
+            <ActivityToolGroup key={item.id} id={item.id} items={item.items} />
           ) : (
             <ActivityItemRow
               key={item.type === "tool" ? item.toolCallId : `${item.type}-${index}`}
@@ -1087,16 +1135,31 @@ function ActivityGroup({ data }: DataMessagePartProps<ActivityGroupData>) {
   );
 }
 
-function ActivityToolGroup({ items }: { items: ToolActivityItem[] }) {
+function ActivityToolGroup({
+  id,
+  items,
+}: {
+  id: string;
+  items: ToolActivityItem[];
+}) {
   const hasError = items.some((item) => item.isError);
   const complete = items.every((item) => item.result !== undefined);
+  const summary = useMemo(() => summarizeToolRun(items), [items]);
+  const [open, setOpen] = usePanelOpenState(groupPanelKey(id));
+  const countsText = formatToolCounts(summary.counts);
+  const diff = toolRunDiff(summary);
 
   return (
-    <details className={`activity-item activity-tool-group ${hasError ? "tool-error" : ""}`}>
-      <summary>
+    <details
+      className={`activity-item activity-tool-group ${hasError ? "tool-error" : ""}`}
+      open={open}
+      onToggle={(event) => setOpen(event.currentTarget.open)}
+    >
+      <summary title={toolNameList(items)}>
         <Wrench size={13} />
-        <strong>Ran {items.length} tools</strong>
-        <span className="activity-preview">{toolGroupPreview(items)}</span>
+        <strong className="activity-verb">{toolRunVerb(summary)}</strong>
+        {countsText && <span className="activity-counts">{countsText}</span>}
+        {diff && <ToolDiffText className="activity-diff" diff={diff} />}
         <span className="tool-state">
           {hasError ? (
             <CircleAlert size={12} />
@@ -1110,7 +1173,7 @@ function ActivityToolGroup({ items }: { items: ToolActivityItem[] }) {
       </summary>
       <div className="activity-tool-list">
         {items.map((item) => (
-          <ActivityItemRow key={item.toolCallId} item={item} />
+          <ToolItemRow key={item.toolCallId} item={item} />
         ))}
       </div>
     </details>
@@ -1136,37 +1199,48 @@ function ActivityItemRow({ item }: { item: ActivityItem }) {
     return <img className="activity-image" src={item.image} alt="Agent output" />;
   }
 
-  if (item.type === "reasoning") {
-    return (
-      <details className="activity-item reasoning-item">
-        <summary>
-          <Brain size={13} />
-          <strong>Thinking</strong>
-          <span className="activity-preview">{shortPreview(item.text)}</span>
-          <ChevronRight className="activity-chevron" size={13} />
-        </summary>
-        <div className="reasoning-detail">{item.text}</div>
-      </details>
-    );
-  }
+  if (item.type === "reasoning") return <ReasoningItemRow item={item} />;
 
-  const complete = item.result !== undefined;
+  return <ToolItemRow item={item} />;
+}
+
+function ReasoningItemRow({ item }: { item: ReasoningActivityItem }) {
+  const [open, setOpen] = usePanelOpenState(reasoningPanelKey(item.text));
   return (
-    <details className={`activity-item tool-item ${item.isError ? "tool-error" : ""}`}>
+    <details
+      className="activity-item reasoning-item"
+      open={open}
+      onToggle={(event) => setOpen(event.currentTarget.open)}
+    >
       <summary>
-        <Wrench size={13} />
-        <strong>{item.toolName}</strong>
-        <span className="activity-preview">{toolPreview(item.args)}</span>
-        <span className="tool-state">
-          {item.isError ? (
-            <CircleAlert size={12} />
-          ) : complete ? (
-            <Check size={12} />
-          ) : (
-            <LoaderCircle className="spin" size={12} />
-          )}
-        </span>
+        <Brain size={13} />
+        <strong>{reasoningLabel(item.durationMs, false)}</strong>
+        <span className="activity-preview">{shortPreview(item.text)}</span>
         <ChevronRight className="activity-chevron" size={13} />
+      </summary>
+      <div className="reasoning-detail">{item.text}</div>
+    </details>
+  );
+}
+
+function ToolItemRow({ item }: { item: ToolActivityItem }) {
+  const complete = item.result !== undefined;
+  const [open, setOpen] = usePanelOpenState(toolPanelKey(item.toolCallId));
+  return (
+    <details
+      className={`activity-item tool-item ${item.isError ? "tool-error" : ""}`}
+      open={open}
+      onToggle={(event) => setOpen(event.currentTarget.open)}
+    >
+      <summary>
+        <ToolRowSummary
+          toolName={item.toolName}
+          args={item.args}
+          complete={complete}
+          isError={Boolean(item.isError)}
+          stateIconSize={12}
+          chevronSize={13}
+        />
       </summary>
       <div className="tool-detail">
         <ToolData label="Arguments" value={item.args} />
@@ -1179,6 +1253,61 @@ function ActivityItemRow({ item }: { item: ActivityItem }) {
         )}
       </div>
     </details>
+  );
+}
+
+/**
+ * One tool row: action word + target + `+N −M`, from the tool catalog. Unknown
+ * tools render their own name as the action instead of disappearing.
+ */
+function ToolRowSummary({
+  toolName,
+  args,
+  complete,
+  isError,
+  stateIconSize = 13,
+  chevronSize = 14,
+}: {
+  toolName: string;
+  args: ChatJsonObject;
+  complete: boolean;
+  isError: boolean;
+  stateIconSize?: number;
+  chevronSize?: number;
+}) {
+  const display = describeToolCall(toolName, args);
+  return (
+    <>
+      <span className="tool-icon">
+        <Wrench size={13} />
+      </span>
+      <strong className="tool-action" title={toolName}>
+        {display.action}
+      </strong>
+      <span className="tool-target" title={display.fullTarget}>
+        {display.target}
+      </span>
+      {display.diff && <ToolDiffText className="tool-diff" diff={display.diff} />}
+      <span className="tool-state">
+        {isError ? (
+          <CircleAlert size={stateIconSize} />
+        ) : complete ? (
+          <Check size={stateIconSize} />
+        ) : (
+          <LoaderCircle className="spin" size={stateIconSize} />
+        )}
+      </span>
+      <ChevronRight className="tool-chevron" size={chevronSize} />
+    </>
+  );
+}
+
+function ToolDiffText({ diff, className }: { diff: ToolDiff; className: string }) {
+  return (
+    <span className={className}>
+      {diff.add > 0 && <span className="diff-add">{`+${diff.add}`}</span>}
+      {diff.remove > 0 && <span className="diff-remove">{`−${diff.remove}`}</span>}
+    </span>
   );
 }
 
@@ -1253,7 +1382,13 @@ function groupActivityTools(items: ActivityItem[]): ActivityRenderItem[] {
     }
 
     if (tools.length === 1) grouped.push(tools[0]);
-    else grouped.push({ type: "tool-group", items: tools });
+    else {
+      grouped.push({
+        type: "tool-group",
+        id: `tools:${tools[0]?.toolCallId ?? index}`,
+        items: tools,
+      });
+    }
   }
 
   return grouped;
@@ -1320,6 +1455,9 @@ function combineAssistantTurn(
   const workPart: DisplayPart = {
     type: "data-activity",
     data: {
+      // Stable across the whole turn: `DisplayMessage.id` changes while the turn
+      // is still growing, which is what used to collapse an expanded group.
+      id: `work:${firstMessage.id}`,
       kind: "work",
       durationMs: Math.max(0, endedAt - startedAt),
       items: workItems,
@@ -1367,18 +1505,25 @@ function groupConsecutiveTools(parts: DisplayPart[]): DisplayPart[] {
       continue;
     }
 
-    const tools: ActivityItem[] = [];
+    const tools: ToolActivityItem[] = [];
     const firstTool = parts[index];
     while (index < parts.length && parts[index].type === "tool-call") {
       const activity = toActivityItem(parts[index]);
-      if (activity) tools.push(activity);
+      if (activity?.type === "tool") tools.push(activity);
       index += 1;
     }
 
     if (tools.length === 1) {
       grouped.push(firstTool);
     } else {
-      grouped.push({ type: "data-activity", data: { kind: "tools", items: tools } });
+      grouped.push({
+        type: "data-activity",
+        data: {
+          id: `tools:${tools[0]?.toolCallId ?? index}`,
+          kind: "tools",
+          items: tools,
+        },
+      });
     }
   }
 
@@ -1387,7 +1532,13 @@ function groupConsecutiveTools(parts: DisplayPart[]): DisplayPart[] {
 
 function toActivityItem(part: DisplayPart): ActivityItem | null {
   if (part.type === "text") return { type: "message", text: part.text };
-  if (part.type === "reasoning") return { type: "reasoning", text: part.text };
+  if (part.type === "reasoning") {
+    return {
+      type: "reasoning",
+      text: part.text,
+      ...(part.durationMs !== undefined ? { durationMs: part.durationMs } : {}),
+    };
+  }
   if (part.type === "image") return { type: "image", image: part.image };
   if (part.type !== "tool-call") return null;
   return {
@@ -1441,34 +1592,36 @@ function shortPreview(value: string, limit = 92): string {
   return `${clipped.replace(/[.…]+$/u, "")}…`;
 }
 
-function toolPreview(args: ChatJsonObject): string {
-  const preferredKeys = [
-    "path",
-    "file",
-    "command",
-    "cmd",
-    "query",
-    "q",
-    "url",
-    "pattern",
-    "description",
-  ];
-  for (const key of preferredKeys) {
-    if (!(key in args)) continue;
-    const value = args[key];
-    if (typeof value === "string" || typeof value === "number") {
-      return shortPreview(String(value));
-    }
-  }
-  return shortPreview(formatValue(args), 72);
+function isToolActivityItem(item: ActivityItem): item is ToolActivityItem {
+  return item.type === "tool";
 }
 
-function toolGroupPreview(items: ActivityItem[]): string {
-  const names = items
-    .filter((item): item is Extract<ActivityItem, { type: "tool" }> => item.type === "tool")
-    .map((item) => item.toolName)
-    .join(", ");
-  return shortPreview(names, 72);
+/** Distinct tool names of a run, used as the group tooltip. */
+function toolNameList(items: ToolActivityItem[]): string {
+  return Array.from(new Set(items.map((item) => item.toolName))).join(", ");
+}
+
+/** Reasoning runs for at least a second before a duration is worth reporting. */
+const REASONING_MIN_DURATION_MS = 1_000;
+
+function reasoningLabel(durationMs: number | undefined, running: boolean): string {
+  if (running) return "思考中";
+  if (durationMs !== undefined && durationMs >= REASONING_MIN_DURATION_MS) {
+    return `已思考 ${formatDuration(durationMs)}`;
+  }
+  // Unknown span: no number, because a guess would be worse than none.
+  return "Thinking";
+}
+
+/**
+ * assistant-ui's reasoning part type does not declare `durationMs`, but the part
+ * object is passed through unchanged, so the optional field is read defensively.
+ */
+function partDurationMs(part: object): number | undefined {
+  const value = (part as { durationMs?: unknown }).durationMs;
+  return typeof value === "number" && Number.isFinite(value) && value > 0
+    ? value
+    : undefined;
 }
 
 function mergeRealtime(

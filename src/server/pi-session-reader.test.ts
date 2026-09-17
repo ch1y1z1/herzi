@@ -151,6 +151,162 @@ describe("PiSessionReader image messages", () => {
   });
 });
 
+describe("PiSessionReader reasoning durations", () => {
+  it("approximates the thinking span from adjacent entry timestamps", async () => {
+    const sessionPath = await writeSession([
+      userEntry("u1", null, "2026-09-15T00:00:00.000Z"),
+      assistantEntry("a1", "u1", {
+        startedAt: "2026-09-15T00:00:00.000Z",
+        writtenAt: "2026-09-15T00:00:30.000Z",
+        thinking: "let me look",
+        text: "answer",
+      }),
+      assistantEntry("a2", "a1", {
+        startedAt: "2026-09-15T00:00:31.000Z",
+        writtenAt: "2026-09-15T00:00:40.000Z",
+        text: "more",
+      }),
+    ]);
+
+    const snapshot = await new PiSessionReader().read("pane-1", sessionPath, false);
+    expect(snapshot.messages[1]?.content[0]).toEqual({
+      type: "reasoning",
+      text: "let me look",
+      durationMs: 30_000,
+    });
+    // Non-reasoning parts never carry a duration.
+    expect(snapshot.messages[1]?.content[1]).toEqual({ type: "text", text: "answer" });
+  });
+
+  it("never counts the pause before the next user message", async () => {
+    const sessionPath = await writeSession([
+      assistantEntry("a1", null, {
+        startedAt: "2026-09-15T00:00:00.000Z",
+        writtenAt: "2026-09-15T00:00:30.000Z",
+        thinking: "quick check",
+        text: "done",
+      }),
+      // The user replies ten minutes later; that idle time is not thinking.
+      userEntry("u2", "a1", "2026-09-15T00:10:00.000Z"),
+    ]);
+
+    const snapshot = await new PiSessionReader().read("pane-1", sessionPath, false);
+    expect(snapshot.messages[0]?.content[0]).toMatchObject({ durationMs: 30_000 });
+  });
+
+  it("uses the entry write time when the branch ends after the reasoning", async () => {
+    const sessionPath = await writeSession([
+      assistantEntry("a1", null, {
+        startedAt: "2026-09-15T00:00:00.000Z",
+        writtenAt: "2026-09-15T00:00:20.000Z",
+        thinking: "last thought",
+        text: "final",
+      }),
+    ]);
+
+    const snapshot = await new PiSessionReader().read("pane-1", sessionPath, false);
+    expect(snapshot.messages[0]?.content[0]).toMatchObject({ durationMs: 20_000 });
+  });
+
+  it("omits the duration when several reasoning blocks share one message", async () => {
+    const sessionPath = await writeSession([
+      assistantEntry("a1", null, {
+        startedAt: "2026-09-15T00:00:00.000Z",
+        writtenAt: "2026-09-15T00:00:30.000Z",
+        thinking: ["first", "second"],
+        text: "answer",
+      }),
+    ]);
+
+    const snapshot = await new PiSessionReader().read("pane-1", sessionPath, false);
+    const content = snapshot.messages[0]?.content ?? [];
+    expect(content.filter((part) => part.type === "reasoning")).toHaveLength(2);
+    for (const part of content) {
+      expect(part).not.toHaveProperty("durationMs");
+    }
+  });
+
+  it("omits the duration when the timestamps cannot produce a span", async () => {
+    const sessionPath = await writeSession([
+      {
+        type: "message",
+        id: "a1",
+        parentId: null,
+        message: {
+          role: "assistant",
+          content: [{ type: "thinking", thinking: "no timestamps" }],
+        },
+      },
+      {
+        type: "message",
+        id: "a2",
+        parentId: "a1",
+        message: { role: "assistant", content: [{ type: "text", text: "hi" }] },
+      },
+    ]);
+
+    const snapshot = await new PiSessionReader().read("pane-1", sessionPath, false);
+    expect(snapshot.messages[0]?.content[0]).toEqual({
+      type: "reasoning",
+      text: "no timestamps",
+    });
+  });
+});
+
+async function writeSession(entries: unknown[]): Promise<string> {
+  const root = await mkdtemp(path.join(process.cwd(), ".tmp-herzi-session-test-"));
+  testRoots.push(root);
+  const sessionPath = path.join(root, "session.jsonl");
+  await writeFile(sessionPath, `${entries.map((entry) => JSON.stringify(entry)).join("\n")}\n`);
+  return sessionPath;
+}
+
+function userEntry(id: string, parentId: string | null, timestamp: string) {
+  return {
+    type: "message",
+    id,
+    parentId,
+    timestamp,
+    message: {
+      role: "user",
+      timestamp: Date.parse(timestamp),
+      content: `prompt ${id}`,
+    },
+  };
+}
+
+function assistantEntry(
+  id: string,
+  parentId: string | null,
+  input: {
+    startedAt: string;
+    writtenAt: string;
+    thinking?: string | string[];
+    text?: string;
+  },
+) {
+  const thinking = input.thinking === undefined
+    ? []
+    : (Array.isArray(input.thinking) ? input.thinking : [input.thinking]).map(
+        (value) => ({ type: "thinking", thinking: value }),
+      );
+  return {
+    type: "message",
+    id,
+    parentId,
+    timestamp: input.writtenAt,
+    message: {
+      role: "assistant",
+      timestamp: Date.parse(input.startedAt),
+      stopReason: "stop",
+      content: [
+        ...thinking,
+        ...(input.text ? [{ type: "text", text: input.text }] : []),
+      ],
+    },
+  };
+}
+
 function pngBytes(): Buffer {
   const bytes = Buffer.alloc(32);
   Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(bytes);

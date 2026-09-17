@@ -3,8 +3,16 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { PaneSummary, PromptDeliveryEvent } from "../../shared/protocol";
+import type {
+  ChatJsonObject,
+  ChatMessage,
+  ChatPart,
+  ChatRealtimeState,
+  PaneSummary,
+  PromptDeliveryEvent,
+} from "../../shared/protocol";
 import { apiFetch } from "../api";
+import { resetPanelOpenStores } from "../panelOpenState";
 import {
   flushPromptDeliveryTrace,
   resetPromptDeliveryTrace,
@@ -423,5 +431,389 @@ describe("ChatView composer focus", () => {
         screen.getByPlaceholderText(/Chat via Herzi/),
       ),
     );
+  });
+});
+
+const TURN_STARTED_AT = Date.parse("2026-09-15T00:00:00.000Z");
+
+function userMessage(): ChatMessage {
+  return {
+    id: "u1",
+    role: "user",
+    createdAt: TURN_STARTED_AT - 1_000,
+    content: [{ type: "text", text: "do it" }],
+  };
+}
+
+function assistantMessage(
+  id: string,
+  content: ChatPart[],
+  extra: Partial<ChatMessage> = {},
+): ChatMessage {
+  return {
+    id,
+    role: "assistant",
+    createdAt: TURN_STARTED_AT,
+    completedAt: TURN_STARTED_AT + 30_000,
+    content,
+    status: { type: "complete", reason: "stop" },
+    ...extra,
+  };
+}
+
+function toolPart(
+  toolCallId: string,
+  toolName: string,
+  args: ChatJsonObject,
+  options: { result?: unknown; isError?: boolean } = {},
+): ChatPart {
+  return {
+    type: "tool-call",
+    toolCallId,
+    toolName,
+    args,
+    ...(options.result !== undefined ? { result: options.result } : {}),
+    ...(options.isError !== undefined ? { isError: options.isError } : {}),
+  };
+}
+
+function stubChat(messages: ChatMessage[], running: boolean): void {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async () =>
+      jsonResponse({
+        paneId: pane.id,
+        running,
+        updatedAt: Date.now(),
+        messages,
+      }),
+    ),
+  );
+}
+
+function realtimeTick(branchRevision: number): ChatRealtimeState {
+  return {
+    paneId: pane.id,
+    runtimeId: "runtime-1",
+    sequence: branchRevision,
+    status: "idle",
+    branchRevision,
+    messages: [],
+    tools: [],
+    updatedAt: Date.now(),
+  };
+}
+
+function groupHeader(): HTMLElement {
+  const header = document.querySelector(".work-group > summary");
+  if (!header) throw new Error("the worked-for group was not rendered");
+  return header as HTMLElement;
+}
+
+function rows(selector = ".work-group .activity-item"): HTMLElement[] {
+  return Array.from(document.querySelectorAll(selector)) as HTMLElement[];
+}
+
+function cell(row: HTMLElement, selector: string): string | null {
+  return row.querySelector(selector)?.textContent ?? null;
+}
+
+describe("ChatView activity presentation", () => {
+  beforeEach(() => {
+    resetPanelOpenStores();
+    stubChat([], false);
+  });
+
+  afterEach(() => {
+    resetPanelOpenStores();
+  });
+
+  it("summarizes a finished turn and gives every tool row an action and a target", async () => {
+    stubChat(
+      [
+        userMessage(),
+        assistantMessage("a1", [
+          { type: "reasoning", text: "先看一下现有实现", durationMs: 12_000 },
+          toolPart("call-bash", "bash", { command: "npm test" }, { result: "ok" }),
+          { type: "text", text: "命令跑完了" },
+          toolPart(
+            "call-edit",
+            "edit",
+            {
+              path: "src/web/toolCatalog.ts",
+              edits: [{ oldText: "old line", newText: "new line" }],
+            },
+            { result: "ok" },
+          ),
+          { type: "text", text: "文件也改了" },
+          toolPart(
+            "call-todo",
+            "todo",
+            { action: "update", id: 1, status: "completed" },
+            { result: "ok" },
+          ),
+          { type: "text", text: "done" },
+        ]),
+      ],
+      false,
+    );
+
+    render(<ChatView pane={pane} />);
+    await screen.findByText("done");
+
+    const header = await waitFor(() => {
+      const element = groupHeader();
+      expect(element).toBeTruthy();
+      return element;
+    });
+    // Phase verb + fixed-order counters + diff total.
+    expect(cell(header, ".activity-verb")).toBe("已修改");
+    expect(cell(header, ".activity-counts")).toBe("1 次文件操作、1 条命令");
+    expect(cell(header, ".diff-add")).toBe("+1");
+    expect(cell(header, ".diff-remove")).toBe("−1");
+
+    const rendered = rows(".work-group .tool-item");
+    expect(rendered.map((row) => cell(row, ".tool-action"))).toEqual([
+      "运行命令",
+      "编辑",
+      "更新计划",
+    ]);
+    // The targets are the real arguments, including the full path tooltip.
+    const [bashRow, editRow, todoRow] = rendered as [HTMLElement, HTMLElement, HTMLElement];
+    expect(cell(bashRow, ".tool-target")).toBe("npm test");
+    expect(cell(editRow, ".tool-target")).toBe("toolCatalog.ts");
+    expect(editRow.querySelector(".tool-target")?.getAttribute("title")).toBe(
+      "src/web/toolCatalog.ts",
+    );
+    expect(todoRow.querySelector(".tool-target")?.textContent).toBe("#1");
+
+    // Thinking keeps its own row, with the server-provided span.
+    const reasoningRow = document.querySelector(".reasoning-item") as HTMLElement;
+    expect(cell(reasoningRow, "strong")).toBe("已思考 12s");
+
+    // todo rows are displayed but never counted (decision D2).
+    expect(header.textContent).not.toContain("步");
+  });
+
+  it("uses the same summary wording for a nested run of tools", async () => {
+    stubChat(
+      [
+        userMessage(),
+        assistantMessage("a1", [
+          toolPart("call-1", "bash", { command: "npm run typecheck" }, { result: "ok" }),
+          toolPart("call-2", "bash", { command: "npm test" }, { result: "ok" }),
+          { type: "text", text: "both green" },
+        ]),
+      ],
+      false,
+    );
+
+    render(<ChatView pane={pane} />);
+    await screen.findByText("both green");
+
+    await waitFor(() => expect(document.querySelector(".activity-tool-group")).toBeTruthy());
+    expect(cell(groupHeader(), ".activity-verb")).toBe("已运行");
+    expect(cell(groupHeader(), ".activity-counts")).toBe("2 条命令");
+
+    const nested = document.querySelector(".activity-tool-group") as HTMLElement;
+    expect(cell(nested, ".activity-verb")).toBe("已运行");
+    expect(cell(nested, ".activity-counts")).toBe("2 条命令");
+    // The tool names are still reachable, as the group tooltip.
+    expect(nested.querySelector("summary")?.getAttribute("title")).toBe("bash");
+    expect(rows(".activity-tool-group .tool-item")).toHaveLength(2);
+  });
+
+  it("still renders rows for unknown tools, missing arguments and failed calls", async () => {
+    stubChat(
+      [
+        userMessage(),
+        assistantMessage("a1", [
+          toolPart(
+            "call-unknown",
+            "mcp__linear__create_issue",
+            { query: "fix build" },
+            { result: "created" },
+          ),
+          { type: "text", text: "外部工具完成" },
+          toolPart(
+            "call-failed",
+            "bash",
+            { command: "npm test" },
+            { result: "boom", isError: true },
+          ),
+          { type: "text", text: "命令失败了" },
+          toolPart("call-empty", "mystery_tool", {}, { result: "ok" }),
+          { type: "text", text: "done" },
+        ]),
+      ],
+      false,
+    );
+
+    render(<ChatView pane={pane} />);
+    await screen.findByText("done");
+
+    await waitFor(() => expect(rows()).toHaveLength(3));
+    const rendered = rows();
+    // Unknown tool: the tool name itself is the action word.
+    expect(cell(rendered[0]!, ".tool-action")).toBe("mcp__linear__create_issue");
+    expect(cell(rendered[0]!, ".tool-target")).toBe("fix build");
+    // A failed call is still a readable row.
+    expect(rendered[1]!.className).toContain("tool-error");
+    expect(cell(rendered[1]!, ".tool-target")).toBe("npm test");
+    // No arguments at all: the row shows the empty-arguments JSON, never blank.
+    expect(cell(rendered[2]!, ".tool-target")).toBe("{}");
+    for (const row of rendered) {
+      expect(row.textContent).not.toContain("undefined");
+      expect(cell(row, ".tool-target")).not.toBe("");
+    }
+
+    // An unknown tool counts as one neutral step, next to the real command.
+    expect(cell(groupHeader(), ".activity-counts")).toBe("1 条命令、2 步");
+  });
+
+  it("shows a thinking duration only when the transcript provides one", async () => {
+    stubChat(
+      [
+        userMessage(),
+        assistantMessage("a1", [
+          { type: "reasoning", text: "有跨度的思考", durationMs: 12_000 },
+          { type: "text", text: "先记一笔" },
+          { type: "reasoning", text: "无法判定的思考" },
+          { type: "text", text: "答案" },
+        ]),
+      ],
+      false,
+    );
+
+    render(<ChatView pane={pane} />);
+    await screen.findByText("答案");
+
+    await waitFor(() => expect(rows(".reasoning-item")).toHaveLength(2));
+    const [timed, unknown] = rows(".reasoning-item") as [HTMLElement, HTMLElement];
+    expect(cell(timed, "strong")).toBe("已思考 12s");
+    // No duration is guessed.
+    expect(cell(unknown, "strong")).toBe("Thinking");
+
+    // Without a single tool row the header keeps the original wording.
+    expect(cell(groupHeader(), ".activity-verb")).toMatch(/^Worked for /);
+    expect(cell(groupHeader(), ".activity-counts")).toBeNull();
+  });
+
+  it("labels live reasoning as in progress", async () => {
+    stubChat(
+      [
+        userMessage(),
+        assistantMessage(
+          "a1",
+          [{ type: "reasoning", text: "正在推敲" }],
+          { status: { type: "running" } },
+        ),
+      ],
+      true,
+    );
+
+    render(<ChatView pane={pane} />);
+    const block = await waitFor(() => {
+      const element = document.querySelector(".reasoning-block");
+      if (!element) throw new Error("no live reasoning block");
+      return element as HTMLElement;
+    });
+    expect(cell(block, "strong")).toBe("思考中");
+  });
+
+  it("keeps a group expanded across the end of a turn and hides its diff while running", async () => {
+    const streaming: ChatMessage[] = [
+      userMessage(),
+      assistantMessage(
+        "a1",
+        [
+          toolPart("call-1", "bash", { command: "npm run typecheck" }),
+          toolPart("call-2", "bash", { command: "npm test" }),
+        ],
+        { status: { type: "running" }, completedAt: undefined },
+      ),
+    ];
+    stubChat(streaming, true);
+
+    const { rerender } = render(<ChatView pane={pane} />);
+    const group = await waitFor(() => {
+      const element = document.querySelector(".activity-group.tool-group");
+      if (!element) throw new Error("the running tool group was not rendered");
+      return element as HTMLDetailsElement;
+    });
+    // A running group never shows a diff total for work that may still change.
+    expect(group.querySelector(".activity-diff")).toBeNull();
+
+    group.open = true;
+    fireEvent(group, new Event("toggle"));
+    expect(group.open).toBe(true);
+
+    stubChat(
+      [
+        userMessage(),
+        assistantMessage("a1", [
+          toolPart("call-1", "bash", { command: "npm run typecheck" }, { result: "ok" }),
+          toolPart("call-2", "bash", { command: "npm test" }, { result: "ok" }),
+          { type: "text", text: "done" },
+        ]),
+      ],
+      false,
+    );
+    rerender(<ChatView pane={pane} realtime={realtimeTick(2)} />);
+
+    await waitFor(() =>
+      expect(document.querySelector(".activity-tool-group")).toBeTruthy(),
+    );
+    const nested = document.querySelector(
+      ".activity-tool-group",
+    ) as HTMLDetailsElement;
+    expect(nested.open).toBe(true);
+  });
+
+  it("keeps a row expanded while streaming once the turn is grouped", async () => {
+    stubChat(
+      [
+        userMessage(),
+        assistantMessage(
+          "a1",
+          [toolPart("call-1", "bash", { command: "npm test" })],
+          { status: { type: "running" }, completedAt: undefined },
+        ),
+      ],
+      true,
+    );
+
+    const { rerender } = render(<ChatView pane={pane} />);
+    const card = await waitFor(() => {
+      const element = document.querySelector(".tool-card");
+      if (!element) throw new Error("the running tool card was not rendered");
+      return element as HTMLDetailsElement;
+    });
+    expect(card.open).toBe(false);
+
+    // The user expands the running row. jsdom does not toggle <details> itself,
+    // so drive the handler the browser fires.
+    card.open = true;
+    fireEvent(card, new Event("toggle"));
+    expect(card.open).toBe(true);
+
+    // The turn finishes: the same tool call is now a row inside the group, i.e.
+    // the message was re-created with a different id.
+    stubChat(
+      [
+        userMessage(),
+        assistantMessage("a1", [
+          toolPart("call-1", "bash", { command: "npm test" }, { result: "ok" }),
+          { type: "text", text: "done" },
+        ]),
+      ],
+      false,
+    );
+    rerender(<ChatView pane={pane} realtime={realtimeTick(1)} />);
+
+    await waitFor(() => expect(document.querySelector(".work-group")).toBeTruthy());
+    const row = document.querySelector(".work-group .tool-item") as HTMLDetailsElement;
+    expect(row).toBeTruthy();
+    expect(row.open).toBe(true);
   });
 });

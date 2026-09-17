@@ -73,7 +73,17 @@ export interface ChatToolResultPayload {
 
 export type ChatPart =
   | { type: "text"; text: string }
-  | { type: "reasoning"; text: string }
+  | {
+      type: "reasoning";
+      text: string;
+      /**
+       * Server-side approximation of how long the model thought before this
+       * reasoning block finished, in milliseconds. It is derived from adjacent
+       * transcript entry timestamps only, so it is absent whenever that span
+       * cannot be derived; clients then show no duration instead of a guess.
+       */
+      durationMs?: number;
+    }
   | {
       type: "image";
       image: string;

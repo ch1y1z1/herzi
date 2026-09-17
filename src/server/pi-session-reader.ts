@@ -153,12 +153,17 @@ function convertActiveBranch(
     });
   }
 
+  const reasoningDurations = reasoningDurationsByEntry(branch);
+
   return branch.flatMap((entry): ChatMessage[] => {
     const message = entry.message;
     if (entry.type !== "message" || !message) return [];
     if (message.role !== "user" && message.role !== "assistant") return [];
 
-    const content = convertContent(message.content, toolResults);
+    const content = attachReasoningDuration(
+      convertContent(message.content, toolResults),
+      reasoningDurations.get(entry.id),
+    );
     if (!content.length) return [];
 
     const entryTimestamp = Date.parse(entry.timestamp ?? "");
@@ -181,6 +186,83 @@ function convertActiveBranch(
       },
     ];
   });
+}
+
+/**
+ * Thinking duration approximation (decision D3).
+ *
+ * The span runs from the moment this entry started (its message timestamp) to
+ * the earlier of two real timestamps:
+ * - the time the entry itself was written (its entry timestamp); this bounds the
+ *   value, so a long pause before the next user message can never be counted as
+ *   thinking; and
+ * - the start of the next entry in the active branch, which during a turn is the
+ *   continuation (another assistant entry or a tool result).
+ *
+ * Entries without usable timestamps are omitted; the reasoning part then carries
+ * no duration and the UI shows none.
+ */
+function reasoningDurationsByEntry(branch: PiEntry[]): Map<string, number> {
+  const durations = new Map<string, number>();
+
+  branch.forEach((entry, index) => {
+    if (entry.message?.role !== "assistant") return;
+    const startedAt = entryStartedAt(entry);
+    if (startedAt === undefined) return;
+
+    const ends = [
+      entryWrittenAt(entry),
+      entryStartedAt(branch[index + 1]),
+    ].filter(
+      (candidate): candidate is number =>
+        candidate !== undefined && candidate > startedAt,
+    );
+    if (!ends.length) return;
+
+    durations.set(entry.id, Math.min(...ends) - startedAt);
+  });
+
+  return durations;
+}
+
+/**
+ * When this entry started: Pi writes the message timestamp when generation
+ * begins, the entry timestamp when the entry is persisted.
+ */
+function entryStartedAt(entry: PiEntry | undefined): number | undefined {
+  if (!entry) return undefined;
+  const messageTimestamp = entry.message?.timestamp;
+  if (typeof messageTimestamp === "number") {
+    const parsed = validTimestamp(messageTimestamp);
+    if (parsed !== undefined) return parsed;
+  }
+  return entryWrittenAt(entry);
+}
+
+/** When the entry was persisted. */
+function entryWrittenAt(entry: PiEntry | undefined): number | undefined {
+  if (!entry) return undefined;
+  return validTimestamp(Date.parse(entry.timestamp ?? ""));
+}
+
+function validTimestamp(value: number): number | undefined {
+  return Number.isFinite(value) && value > 0 ? value : undefined;
+}
+
+/**
+ * Only a message with exactly one reasoning part can be attributed a duration;
+ * with several blocks in one entry the timestamps cannot be split between them,
+ * so none of them gets a number.
+ */
+function attachReasoningDuration(
+  parts: ChatPart[],
+  durationMs: number | undefined,
+): ChatPart[] {
+  if (durationMs === undefined) return parts;
+  if (parts.filter((part) => part.type === "reasoning").length !== 1) return parts;
+  return parts.map((part) =>
+    part.type === "reasoning" ? { ...part, durationMs } : part,
+  );
 }
 
 function convertContent(
