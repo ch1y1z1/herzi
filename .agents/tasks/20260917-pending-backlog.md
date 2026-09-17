@@ -15,18 +15,21 @@
 - 集成态验证：`typecheck` PASS、`npm test` 13 files / 100 tests PASS、`build` PASS。
 - 未验证：真实浏览器视觉验收 `NOT RUN`（开发者决定暂不验）。
 
-### 2. 修 `Worked for` 提前出现与闪烁（进行中）
+### 2. 修 `Worked for` 提前出现与闪烁（已完成）
 
 - 分析：`.agents/tasks/20260917-worked-for-premature-group-bug.md`
-- 已授权范围：F-B + F-A + F-C（F-D 不做）。
-- 批次记录：`.agents/tasks/20260917-worked-for-fix-batch.md`；Worker `herzi_fix`（`w15:p1`）`working`。
+- 范围 F-B + F-A + F-C（F-D 不做）；交付并入 main：`2ee16d5`(fix) + `b824bcf`(record) + `dc8282c`(注释漂移修正)。
+- Integrator 独立可证伪验证：回退修复后目标测试 **5 failed / 27 passed**，还原后 32 passed。
+- 合入后完整验证：`typecheck` PASS、`npm test` 15 files / **117 tests** PASS、`build` PASS。已推送 `origin/main` = `dc8282c`。
+- 未验证：真实浏览器视觉验收 `NOT RUN`。
 
-### 3. 压缩分界 + todo 状态条（必须在 2 之后）
+### 3. 压缩分界 + todo 状态条（进行中）
 
 - 方案：`docs/chat-compaction-todo-askuser-plan.md`（§8 已记录确认结果）
 - 已确认范围：**压缩分界**（语义边界插入、横线 + 可展开摘要与文件列表、作为组边界分割 `Worked for`）+ **todo 状态条**（composer 上方可折叠，计数与分组列表，空列表不占位）。
 - 已确认不做：压缩进行中的实时提示；`todo` 继续不参与汇总与阶段动词。
 - **暂缓**：`ask_user_question` 全部（含只读展示）——开发者认为「在 Chat 里直接回答」最复杂，稍后单独详谈；在讨论出结论前不派 Worker。
+- 批次记录：`.agents/tasks/20260917-compaction-todo-batch.md`；Worker `herzi_compaction`（`w16:p1`）`working`。
 
 ### 4. 延后项（低优先；其中三项单独一轮，见开发者决策）
 
