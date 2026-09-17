@@ -1,6 +1,6 @@
 # Worker 任务契约：压缩分界 + todo 状态条的系统性自查与修复
 
-- 状态：**第一轮自查/修复 + 第二轮 Reviewer findings（F1/F2）修复完成，本地验证完成，待同一独立 Reviewer 复验**（详见文末两份执行记录）
+- 状态：**第一轮自查/修复 + 第二轮 F1/F2 + 第三轮 F-A/F-B/F-D/F-E 均已修复并本地验证完成，待同一独立 Reviewer 聚焦复验**（详见文末三份执行记录）
 - 角色：Worker（单 Agent，**新 Agent，不是原实现者**）
 - Base：`9af9eac`（原实现 commit，位于分支 `agent-20260917-compaction-todo`）
 - Branch：`agent-20260917-compaction-fix`
@@ -404,3 +404,97 @@ AssertionError: missing: expected undefined to deeply equal [ { id: 1, subject: 
 
 - 建议复验重点：`useChatFooterInset()` 的 inset 语义与 176px 下界、回退值（176 / 496）与「无可用测量」判据、`TodoStatusBar` 改为接收 `tasks` 后交互语义是否完全不变、`ChatTodosSnapshot.nextId` 放宽后是否仍无既有字段语义变化。
 - 本分支未 push；合入 `main` 需开发者逐批批准。
+
+---
+
+# 第三轮：Reviewer 第二轮 findings F-A / F-B / F-D / F-E 关闭记录（2026-09-17）
+
+- 状态：**4 项 P3 已处理并本地验证完成，待同一 Reviewer 聚焦复验**
+- 依据：`/Users/chiyizi/.herdr/worktrees/herzi/review-20260917-compaction-fix/.agents/tasks/20260917-compaction-rereview.md` §4（F-A / F-B / F-D / F-E）与 §3.1.4 / §3.1.5（只读）
+- 改动范围：**仅** `src/web/components/ChatView.tsx`、`src/web/components/ChatView.test.tsx` + 本记录（F-C 未做，按开发者指示本轮只关这 4 条）
+- 未运行 `npm run dev`、未操作真实 Pane、未 merge/rebase/push、未新增依赖
+
+## 1. F-D：首帧瞬态（effect 改为 layout timing）
+
+- 改动：`useChatFooterInset` 的 `useEffect` → `useLayoutEffect`（新增 `useLayoutEffect` import）。注释写明原因：todo 条的展开状态存在 `panelOpenState` 里、**跨重挂载保留**，而 ChatView 在 Terminal↔Chat 与 Pane 切换时被 `key={pane.id}` 重挂载；被动 effect 的时间点在提交之后，重挂载后的首帧会先用样式表的 176px 回退。CSR-only，没有 SSR 分支。
+- **验证边界（重要，不做假测试）**：jsdom 下无法用断言区分两者。我先按开发者建议尝试写「变量在提交阶段就写好」的断言——用 `createRoot` + `flushSync` 渲染且**不**包在 testing-library 的 `act()` 里，期望被动 effect 仍处于 pending：
+  - 该断言在 `useLayoutEffect` 下通过，**把实现改回 `useEffect` 后同样通过**（React 的 `flushSync` 在同步提交后也会把 pending 的被动 effect 冲刷掉）；
+  - 也就是说这条断言无法证伪，属于「假测试」→ **已删除**（连同 `flushSync` / `createRoot` / `act` 的 import 一起），没有留在测试集里。
+  - 结论：**F-D 由代码审阅确认（一行改动 + 注释说明），真实浏览器下一帧的可见性 `NOT RUN`**，请审阅者按此口径复验；若真实浏览器仍能看到残留遮挡，优先改这里而不是改常量。
+
+## 2. F-A：观测绑定（P3，测试缺口）
+
+- 断言位置：新增用例 `watches the pane's bottom edge with the same observer as the footer`。
+- 断言写法严格按 Reviewer 的要求绑定「观测 `.chat-footer` 的那个 observer」：`observers.some(o => o.targets.has(footer) && o.targets.has(viewport))`，即**同一个实例**同时观测两者；没有写成「存在某个观测 viewport 的 observer」（assistant-ui 自己也观测 viewport，那样抓不住回归——Reviewer 已在 F-A 里实测说明）。
+- 同一条用例还加了行为层断言（超出「只读结构」的补强）：只把 **pane 底边**下移 100px（footer 尺寸不变）、只通知观测 viewport 的 observer，预留必须从 `480px` 变成 `580px`。这直接钉住「窗口 resize / 窄屏 sidebar 时预留会跟着走」这一 F-A 关心的场景。
+- 为写这条断言，测试的假 ResizeObserver 从「收集 footer 回调」升级为记录**每个实例的 targets + callback + disconnected**（`stubResizeObserver()` / `observersWatching()` / `notifyObservers()`），原有 5 条用例改用同一套 API，语义不变。
+- **可证伪验证（实测）**：
+
+  ```bash
+  # 在 /tmp/herzi-fix3-mut（工作区 src 的副本）里删掉 `observer.observe(viewport);`
+  npx vitest run src/web/components/ChatView.test.tsx -t "ChatView footer reservation"
+  # Tests  1 failed | 6 passed | 46 skipped (53)
+  #   × watches the pane's bottom edge with the same observer as the footer
+  # 原文：AssertionError: expected false to be true  ❯ ChatView.test.tsx:2048
+  # 还原后同一命令：Tests 7 passed | 46 skipped (53)
+  ```
+
+  即只有这一条失败、其它 6 条不受影响 → 断言与实现严格对应。
+
+## 3. F-B：observer teardown（P3，测试缺口）
+
+- 断言位置：新增用例 `disconnects its observers when the view is torn down`。
+- 断言：unmount 之前先确认「观测 footer 的 observer 尚未 disconnected」（防止假阳性），`view.unmount()` 之后断言这些 observer **全部** `disconnected === true`。
+- **可证伪验证（实测）**：
+
+  ```bash
+  # 把 `return () => observer?.disconnect();` 改成 `return () => undefined;`
+  npx vitest run src/web/components/ChatView.test.tsx -t "ChatView footer reservation"
+  # Tests  1 failed | 6 passed | 46 skipped (53)
+  #   × disconnects its observers when the view is torn down
+  # 原文：AssertionError: expected false to be true  ❯ ChatView.test.tsx:2079
+  # 还原后：Tests 7 passed | 46 skipped (53)
+  ```
+
+## 4. F-E：样式表断言的 cwd 依赖（P3，可移植性）
+
+- 改动：`readFileSync(path.join(process.cwd(), "src/web/styles.css"))` → `readFileSync(path.join(import.meta.dirname, "../styles.css"))`，锚定到测试文件自身所在的被测树。
+- 尝试过的另外两种写法（都不可用，记录以免后来者重踩）：
+  1. `new URL("../styles.css", import.meta.url)`：Vite 会把**字面量**形式的 `new URL(..., import.meta.url)` 重写成 dev-server URL，实测解析成 `http://localhost:3000/src/web/styles.css`，`readFileSync` 报 `TypeError: The URL must be of scheme file`。（把相对路径放进变量后它就不再被改写，但需要额外解释这条 Vite 行为，故改用 `import.meta.dirname`。）
+  2. `import stylesheetSource from "../styles.css?raw"`：vitest 的 CSS 处理下该模块内容是**空字符串**（`rawLength: 0`），断言直接失效。
+  `import.meta.dirname` 在 vitest 转换后的模块里可用（`@types/node` 也声明了它，`npm run typecheck` 通过），并且 Vite 不会改写它；jsdom 环境的 `document.baseURI` 是 `http://localhost:3000/`，但 `import.meta.url` / `import.meta.dirname` 仍是真实 file 路径（已实测打印确认）。
+- **可证伪验证（实测，两次都从 `cwd=/tmp` 启动、root 指向被测树）**：
+
+  ```bash
+  cd /tmp
+  # 修复前：被测树 = /tmp/herzi-fix3-prefix（git archive 8fe5b3f，含 process.cwd() 版本的用例）
+  vitest run --config /tmp/herzi-fix3-prefix/vitest.cwd.config.ts ChatView.test.tsx -t "keeps the stylesheet wired"
+  # Tests  1 failed (1)
+  # Error: ENOENT: no such file or directory, open '/private/tmp/src/web/styles.css'
+  #        ❯ ChatView.test.tsx:2092  path.join(process.cwd(), "src/web/styles.css")
+
+  # 修复后：被测树 = /tmp/herzi-fix3-mut（当前工作区 src 的副本），同一 cwd
+  HERZI_TEST_ROOT=/tmp/herzi-fix3-mut vitest run --config /tmp/herzi-fix3-prefix/vitest.cwd.config.ts \
+    ChatView.test.tsx -t "keeps the stylesheet wired"
+  # Tests  1 passed | 52 skipped (53)
+  ```
+
+  （那是为了固定 `root` 而临时写的 vitest 配置，放在 /tmp 的临时树里，没有进入工作区。）
+
+## 5. 验证结果（本轮工作区）
+
+| 项目 | 命令 | 结果 |
+| --- | --- | --- |
+| 目标测试（组件） | `npx vitest run src/web/components/ChatView.test.tsx` | **PASS** 53/53 |
+| 目标测试（服务端，未改动） | `npx vitest run src/server/pi-session-reader.test.ts` | **PASS** 22/22 |
+| 全量测试 | `npm test` | **PASS** 15 files / **166 tests**（基线 164，本轮 +2：F-A、F-B 各一条） |
+| 类型检查 | `npm run typecheck` | **PASS**（exit 0） |
+| 构建 | `npm run build` | **PASS**（仅既存 chunk 体积警告） |
+| F-A / F-B 变异验证 | 见 §2 / §3 | 各自**只**让对应那一条失败 |
+| F-D 真实浏览器首帧可见性 | — | **NOT RUN**（jsdom 无法区分 `useLayoutEffect` 与 `useEffect`，已如实记录，见 §1） |
+| 真实 Pane / session 验收 | — | **NOT RUN** |
+
+## 6. 本轮未做（按开发者指示不扩大）
+
+- F-C（`promptCalls()` 过滤 `/prompt` 同时命中 `/prompt-delivery/events` 导致负载下偶发失败）：既有测试脆弱点，非本批引入，本轮未改。
+- 上轮登记、仍未处理的降级项：超 128 KiB 整条不渲染、`at: 0` 共享展开状态、`role:createdAt` 去重键、客户端不限制 todo 行数、kept entry 非消息时分界顺延、turnActivity latch（背景项）。
