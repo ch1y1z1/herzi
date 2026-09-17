@@ -206,3 +206,17 @@ HERZI_PORT=3041 npm start        # 生产模式：同一进程既服务 dist/web
 **清理**：测量后清理了自己启动的全部资源——3041 候选服务（pid 9567）、browser-use daemon（pid 72570，21:31 启动）、`/tmp/candidate-3041.*`、`/tmp/bu-*.log`、`/tmp/rv-ci.log`；清除了 CDP 的 viewport override。开发者的 Chrome 未关闭、未改动。
 
 **未确认项**：我用 `close_tab()` 关闭了自己创建的那个 Herzi tab，随后 harness 报 `cdp_disconnected`（与该 tab 被关闭一致），但本机 Chrome 152 的 `/json/*` HTTP 端点对 curl 不响应，因此**无法从命令行二次确认该 tab 是否已关闭**；若开发者看到残留 tab，可自行关闭。
+
+## 第二轮复审结论与后续（2026-09-17）
+
+**Reviewer 结论：可以合入，无阻断，无 P0/P1/P2。** 记录 `f9f5c5a`（`w18`）。其独立验证：F1 两条路径恒 `>=176px`、`observer === null` 分支实测不可达（删掉全局 `ResizeObserver` 会在 assistant-ui 的 `useSizeHandle` 处直接抛错）；F2 五种非数字 `nextId` 与四种非数组 `tasks` 全部独立验证，且未退化成"什么都收"；独立复跑 `typecheck` / **164 tests** / `build` 全 PASS，另加它自建 37 条断言；在**真实修复前树**（`git archive 6212c4b`）上取得 fail-before-fix（F1 5 条、F2 1 条）；9 个变异中 4 个指定必测项被抓、2 个暴露测试缺口；与 `dc8282c` 的 12 个形状 trace 逐字节一致。
+
+**本轮新 findings（全为 P3）**：F-A 无测试覆盖 `observer.observe(viewport)`（删掉后 164 个测试全绿）；F-B 无测试覆盖 observer teardown；F-C 上轮 F7 的 flaky 断言在负载下再次复现（既有问题）；F-D 首帧瞬态——effect 用 `useEffect`，重挂载且 todo 条已展开时首帧用 176px 回退，建议 `useLayoutEffect`；F-E 样式表断言依赖 `process.cwd()`。
+
+**开发者决定（2026-09-17）**：
+1. **先打小补丁再合**：F-D（`useLayoutEffect`）+ F-A/F-B（两条断言）+ F-E（路径锚定），由原修复者执行、同一位 Reviewer 聚焦复验；
+2. 合入后**立即 push**；
+3. 合入并 push 后**清理 w17/w18** 的 worktree 与分支（先核对内容已进 main）；
+4. 其余 P3 遗留（F3–F9、F-C，以及已排队的 F11 CSS / flaky 定时器 / N1）**合并为一轮**处理，其中 F3 需开发者先定"文档口径 or 改代码"。
+
+**执行记录**：已向 `herzi_audit`（`w17:p1`）派发该小补丁；第一次派发因模型提供方容量限制中断（`deepseek ... at capacity`），工作区未产生改动（HEAD 仍为 `8fe5b3f`）；重试后确认 `working`。
