@@ -21,10 +21,12 @@
 - 已授权范围：F-B + F-A + F-C（F-D 不做）。
 - 批次记录：`.agents/tasks/20260917-worked-for-fix-batch.md`；Worker `herzi_fix`（`w15:p1`）`working`。
 
-### 3. 压缩分界 + todo 列表 + ask_user_question（必须在 2 之后）
+### 3. 压缩分界 + todo 状态条（必须在 2 之后）
 
-- 方案：`docs/chat-compaction-todo-askuser-plan.md`
-- 阶段：P0 压缩分界（含分割 `Worked for`）、P1 todo 状态条、P2 `ask_user_question` 只读展示 + 切 Terminal；P3 一键回答为可选项。
+- 方案：`docs/chat-compaction-todo-askuser-plan.md`（§8 已记录确认结果）
+- 已确认范围：**压缩分界**（语义边界插入、横线 + 可展开摘要与文件列表、作为组边界分割 `Worked for`）+ **todo 状态条**（composer 上方可折叠，计数与分组列表，空列表不占位）。
+- 已确认不做：压缩进行中的实时提示；`todo` 继续不参与汇总与阶段动词。
+- **暂缓**：`ask_user_question` 全部（含只读展示）——开发者认为「在 Chat 里直接回答」最复杂，稍后单独详谈；在讨论出结论前不派 Worker。
 
 ### 4. 延后项（低优先；其中三项单独一轮，见开发者决策）
 
