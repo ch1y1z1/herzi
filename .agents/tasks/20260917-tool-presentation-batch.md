@@ -33,3 +33,11 @@
 
 - 真实浏览器视觉验收（组头文案与行的实际观感、tooltip 行为）预计仍需授权后在隔离环境执行。
 - `main` 当前领先 `origin/main` 若干 commit，尚未推送（等待开发者决定）。
+
+## Worker 完成（2026-09-17）
+
+- Worker `herzi_tools` 状态 `idle`，worktree clean，交付 commit `e53e3c6`。
+- 范围检查：11 个文件全部在契约 write set 内（`toolCatalog.ts(+test)`、`panelOpenState.ts(+test)`、`ChatView.tsx(+test)`、`styles.css`、`pi-session-reader.ts(+test)`、`protocol.ts`、任务记录），无越界。
+- Worker 自报：`npm ci` PASS；`toolCatalog` 17 / `panelOpenState` 9 / `pi-session-reader` 8 / `ChatView` 15 PASS；`npm run typecheck` PASS；`npm test` PASS（13 files / 100 tests）；`npm run build` PASS；真实浏览器视觉验收 `NOT RUN`。
+- Worker 标注了两处口径：D1 只有 `edit`/`write` 按 path 去重（`read` 按调用次数）；D3 结束边界取 `min(本条 entry 写入时间, 下一条 entry 起始时间)`。另自行判断 `todo` 不参与阶段动词表决并标注待确认。
+- Integrator 尚未复核，尚未合入 `main`。待办清单见 [`20260917-pending-backlog.md`](./20260917-pending-backlog.md)。
