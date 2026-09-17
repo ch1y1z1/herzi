@@ -6,25 +6,27 @@
 
 ## 依赖顺序
 
-### 1. 集成 `agent-20260917-tool-presentation`（阻塞项）
+### 1. 集成 `agent-20260917-tool-presentation`（已完成）
 
 - 交付：Worker `herzi_tools`（`w14:p1`）commit `e53e3c6`，worktree clean。
 - 范围检查：已完成，11 个文件全部落在契约 write set 内，无越界。
 - Worker 自报验证：`npm ci` PASS、四个目标测试 PASS、`npm run typecheck` PASS、`npm test` PASS（13 files / 100 tests）、`npm run build` PASS；真实浏览器视觉验收 `NOT RUN`。
-- 待 Integrator 执行：逐文件审阅 → 复核目标测试 → 合入前完整验证 → 汇报 → 等批准。
-- 阻塞原因：它改的 `ChatView.tsx` / `styles.css` / `protocol.ts` / `pi-session-reader.ts` 是下面第 2、3 项的必改文件。
+- 集成结果：cherry-pick 为 `d9ee427`，Integrator 修正 `b8f232b`（`todo` 真实 action 词表），已推送 `origin/main`。
+- 集成态验证：`typecheck` PASS、`npm test` 13 files / 100 tests PASS、`build` PASS。
+- 未验证：真实浏览器视觉验收 `NOT RUN`（开发者决定暂不验）。
 
-### 2. 修 `Worked for` 提前出现与闪烁（必须在 1 之后）
+### 2. 修 `Worked for` 提前出现与闪烁（进行中）
 
 - 分析：`.agents/tasks/20260917-worked-for-premature-group-bug.md`
-- 候选修复：F-B（`blocked` 视为未结束）、F-A（单调的 turn running 判定）、F-C（稳定 turn key）、F-D（bridge 不再用 `Date.now()` 兜底）。
+- 已授权范围：F-B + F-A + F-C（F-D 不做）。
+- 批次记录：`.agents/tasks/20260917-worked-for-fix-batch.md`；Worker `herzi_fix`（`w15:p1`）`working`。
 
 ### 3. 压缩分界 + todo 列表 + ask_user_question（必须在 2 之后）
 
 - 方案：`docs/chat-compaction-todo-askuser-plan.md`
 - 阶段：P0 压缩分界（含分割 `Worked for`）、P1 todo 状态条、P2 `ask_user_question` 只读展示 + 切 Terminal；P3 一键回答为可选项。
 
-### 4. 延后项（低优先，可择机批量处理）
+### 4. 延后项（低优先；其中三项单独一轮，见开发者决策）
 
 来自 chat-reliability 批次：
 
@@ -51,4 +53,19 @@
 
 ## 决策点（等待用户回答）
 
-见对话中给出的选择题；结果会回填到本节。
+已确认（2026-09-17）：
+
+- 集成方式：合入 main 后单独问 push → 已执行并推送 `origin/main` = `b8f232b`。
+- bug 范围：F-B + F-A + F-C。
+- 顺序：集成 → bug → 压缩/todo/ask_user。
+- 延后项：F11 投递状态行 CSS、flaky 定时器清理、N1 fail-open 映射 → **单独一轮**（未开始）。
+- 浏览器验收：暂不验，开发者需要时会联系。
+
+仍未回答（压缩方案）：
+
+- P1 分界线位置：语义边界 vs 写入位置。
+- P2 被摘要历史：保留显示 vs 隐藏。
+- P3 todo 面板位置：composer 上方 / Chat 顶部 / 侧栏。
+- P4 `ask_user_question`：只展示 + 切 Terminal vs 也要一键回答。
+- P5 压缩进行中的实时提示：做 vs 不做。
+- P6 Worker 的 `todo` 表决口径：接受 vs 参与表决。
