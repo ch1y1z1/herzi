@@ -40,3 +40,18 @@
 - 我最初误把开发者的「永远使用中文」理解为针对 `todo` 的 `activeForm`，并误加了独立的「工具文案」一节；开发者随后澄清：指的是**全局 `~/.pi/agent/AGENTS.md` 的「输出节奏」第 2 条**那句「过程中主动给阶段性文字」。
 - 已更正：删除误加的「工具文案」节，直接改第 2 条 —— 过程中的阶段性文字必须用中文，且仍然不是请求确认。
 - 与本批次的关系：无代码影响（todo 状态条与本约定无关）。当前文件为 4 节：全局要求、输出节奏、提问方式。
+
+## Integrator 审阅与集成（2026-09-17）
+
+- 审阅结论：8 个文件全部在契约 write set 内（`pi-session-reader.ts(+test)`、`protocol.ts`、新增 `src/shared/todo-tasks.ts`、`ChatView.tsx(+test)`、`styles.css`、任务记录），无越界。
+  - 压缩分界：`ChatDividerPart` 纯新增；reader 用 slot(boundary, rank) 排序，分界插在「`firstKeptEntryId` 对应 entry 之前」，缺失/不在分支上退回自身位置；被摘要历史照常显示。
+  - 分组：`combineAssistantTurn` 在 `data-divider` 处 flush 当前组并开新段（segment id `work:<firstId>:N` 稳定）；运行中仍全部内联；只有分界消息的 turn 不伪造 `Worked for`；turn 时长只在包含非分界 part 的消息上计算。
+  - todo：`src/shared/todo-tasks.ts` 只保留已核实字段、未知 status 保留可渲染、超 128 KiB 降级为 `{tasks: [], truncated: true}` 而非截半张列表；`ChatTodosSnapshot` 纯新增可选字段。
+- **Integrator 独立可证伪验证**（第一次脚本引入语法错误，结果无效，已重做）：
+  - 把分界位置回退为「compaction entry 自身位置」→ `pi-session-reader.test.ts` **2 failed / 44 passed**，含 `places the compaction divider before the first kept entry (semantic boundary)`。
+  - 把分组回退为「分界不再 flush 当前组」→ `ChatView.test.tsx` **1 failed / 27 passed**，即 `breaks a turn into two Worked for groups around a compaction divider`。
+  - 两次回退前均用 `tsc --noEmit` 确认改动语法有效；还原后目标测试 46 passed。
+- cherry-pick：`9af9eac` → main `0a73bc4`；唯一冲突是 `.agents/tasks/20260917-compaction-todo.md`（main 原本没有该文件），按保留 Worker 版本解决。
+- 合入后完整验证（main）：`npm run typecheck` PASS；`npm test` PASS（15 files / **137 tests**，基线 117）；`npm run build` PASS。
+- Worker 自述并已采纳的 4 处近似（记录在其任务记录 §2）：分界消息借用相邻消息的 `createdAt` 作为排序锚点（真实压缩时间保留在 part 的 `at`）；两段 `Worked for` 共用整轮时长，不按分界切分造数字；无可用时间戳时 `at: 0` 且不显示时间；`firstKeptEntryId` 指向不产生消息的 entry 时分界位置顺延。
+- 未验证：真实浏览器视觉验收 `NOT RUN`；未用真实 session 文件校验（读真实 transcript 需开发者明确许可）。
