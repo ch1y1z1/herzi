@@ -165,7 +165,28 @@ interface ToolDisplay {
 
 折叠状态下在组头下方显示一行最新进展（最新 reasoning 的一行 / 正在运行的工具名），节流采样；`prefers-reduced-motion` 下关闭动画。当前 `PiRealtimeStore` 已提供 `running` 状态与最新消息，可实现，但价值低于前面几项，建议放最后或不做。
 
-## 5. 待决策项
+## 5. 已确认决策（2026-09-17）
+
+用户在 2026-09-17 确认：**D1–D6 全部按推荐执行**，并指定用一个 Worker worktree + 一个新代理完成实施。
+
+| 编号 | 决策 | 确认结果 |
+| --- | --- | --- |
+| D1 | 文件类计数：唯一路径 vs 调用次数 | **唯一路径**计数（`edit` / `write` 的 path 去重） |
+| D2 | `todo` 是否计入汇总 | **不计入**汇总；组内仍然显示行 |
+| D3 | thinking 时长来源 | **服务端**用相邻 entry 时间戳近似；算不出就不显示时长 |
+| D4 | thinking 预览是否改多行 | **先维持单行** |
+| D5 | 展开状态持久化 / live peek | **做持久化**；live peek 不做 |
+| D6 | 实施方式 | **单 Worker Agent + 一个 worktree**，完成后由 Integrator 集成与验证 |
+
+因此本次实施范围 = P0 + P1 + P2 + P3（仅持久化部分，排除 live peek）。
+
+### 实施基线
+
+- Worker worktree 从 `main` 的已提交 HEAD 创建；任务契约写在 `.agents/tasks/20260917-chat-tool-presentation.md`。
+- Worker 的写入范围：`src/web/toolCatalog.ts`（新）、`src/web/components/ChatView.tsx`、`src/web/styles.css`、展开状态模块（新）、`src/server/pi-session-reader.ts`、`src/shared/protocol.ts`，以及上述文件的测试；以及自己的任务记录。
+- 不包含：live peek、分组规则变更（保留单一 `Worked for` 组）、任何服务端 API 行为变更。
+
+## 6. 待决策项（已全部关闭）
 
 | 编号 | 决策 | 推荐 |
 | --- | --- | --- |
@@ -217,7 +238,6 @@ interface ToolDisplay {
 6. **性能**：目录与汇总都是纯函数、只作用于当前可见 turn；diff 行数在参数上直接计算，不做全文件读取。
 
 ## 9. 完成标准
-
 - 组内每一行都能回答"做了什么、对什么做"；
 - 组头能回答"这一轮大致做了什么、规模多大、净改动多少"；
 - 真实数据里 `todo` 不淹没摘要；
