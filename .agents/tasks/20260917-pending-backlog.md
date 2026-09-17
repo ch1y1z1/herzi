@@ -84,3 +84,8 @@
   - 删除方式：先删各自 gitignored 的 `node_modules`/`dist`，再用 `herdr worktree remove`（`forced: false`），最后删分支。
   - 仍保留：`agent-20260917-compaction-todo`（w16）—— **正在使用中**。
 - 待确认的其它残留资源：测试 pane `wW:p5`（agent `pi_cadence`，用于验证输出节奏规则）、`/tmp/pi-cadence-test`、`/tmp/memoh-ref`（参考克隆，约 65 MB）。
+- 2026-09-17（第二轮清理，按开发者"全部清理"决定）：
+  - 关闭测试 Pane `wW:p5`（agent `pi_cadence`）。Herdr 0.8.2 的 CLI 没有 `pane close`，改用协议里的 `pane.close`（`PaneTarget{pane_id}`）直接发到 `herdr.sock`，返回 `{"result":{"type":"ok"}}`；`wW` 现只剩 `wW:p1`（本会话）与无 agent 的 `wW:p4`。
+  - 删除 `/tmp/pi-cadence-test`（测试 Pane 的工作目录）与 `/tmp/memoh-ref`（Memoh 参考克隆，约 65 MB）——Memoh 的结论已落盘到 `docs/agent-activity-rendering-reference.md`，后续 `ask_user_question` 讨论依据的是本机 `@juicesharp/rpiv-*` 代码而非 Memoh。
+  - 删除了 `/tmp/herzi-repro.log` 等临时输出。
+- 结论：本轮全部临时资源已清空；仍在使用的只有 `agent-20260917-compaction-todo`（w16）。
