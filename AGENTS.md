@@ -33,6 +33,7 @@
 - Worker 只修改约定范围，维护自己的 `.agents/tasks/<task-id>.md`，运行局部检查，并交付 commit、验证结果和未决问题。
 - Worker 不合并其他 Worker 分支，也不直接合入或推送 `main`。
 - Reviewer 仅在协议、并发、持久化、安全、隐私或较大改动中按需使用；默认只报告带文件和行号的问题。
+- **每个 Worker 交付在集成前必须由独立 Reviewer 审查**：Reviewer 使用自己的 worktree/分支、只读产品代码、只写 review 记录，findings 必须先处置（修复或由用户明确接受）才允许集成；未经审查的交付不得进入集成流程。
 - Integrator 发送 Worker prompt 后，只确认 Agent 已进入 `working` 就返回控制，不持续等待完成；用户可以直接与 Worker 交互，并在 Worker 完成后手动通知 Integrator继续集成。
 - Worker 遇到问题或决策点时直接在自己的 Pane 向用户提问并等待，不通过 Integrator 代传或自行猜测。
 - 无法明确隔离修改范围时，改为串行，不增加管理层来强行并行。
@@ -67,5 +68,6 @@
 
 - Integrator 按依赖顺序集成 Worker commit；纯文本冲突可在理解双方意图后解决，行为或接口冲突退回相关 Worker。
 - 集成后更新长期文档、索引和任务记录，使文件状态与真实实现、验证结果一致。
+- **合入 `main` 必须逐批单独获得用户批准**：上一批次的批准不适用于下一批次；未获批准时只能保留在 Worker 分支或本地集成分支。
 - 未经用户最终批准，不合入或推送 `main`，也不清理仍需复核的 worktree/branch。
 - 若协调成本高于并行收益，减少并行，而不是增加角色、状态机或模板。
