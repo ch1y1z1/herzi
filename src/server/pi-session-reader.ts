@@ -2,12 +2,15 @@ import { createHash } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
 
 import type {
+  ChatDividerKind,
   ChatJsonObject,
   ChatMessage,
   ChatPart,
   ChatSnapshot,
+  ChatTodosSnapshot,
   ChatToolResultPayload,
 } from "../shared/protocol.js";
+import { buildTodoSnapshot, isTodoDetails, type TodoDetails } from "../shared/todo-tasks.js";
 import { extractManagedAttachments } from "./managed-attachments.js";
 
 interface PiEntry {
@@ -16,6 +19,11 @@ interface PiEntry {
   timestamp?: string;
   type: string;
   message?: PiMessage;
+  /** `compaction` / `branch_summary` entries only. */
+  summary?: string;
+  firstKeptEntryId?: string;
+  tokensBefore?: number;
+  details?: unknown;
 }
 
 interface PiMessage {
@@ -26,6 +34,8 @@ interface PiMessage {
   toolName?: string;
   isError?: boolean;
   stopReason?: string;
+  /** `todo` tool results carry their full state here. */
+  details?: unknown;
 }
 
 type PiContent =
@@ -89,12 +99,13 @@ export class PiSessionReader {
       updatedAt: cached.mtimeMs,
       messages: this.resolveManagedAttachment
         ? await hydrateManagedAttachments(
-            messages,
+            messages.messages,
             paneId,
             sessionPath,
             this.resolveManagedAttachment,
           )
-        : messages,
+        : messages.messages,
+      ...(messages.todos ? { todos: messages.todos } : {}),
     };
   }
 }
@@ -115,11 +126,25 @@ function parseJsonLines(source: string): PiEntry[] {
   return entries;
 }
 
+interface BranchConversion {
+  messages: ChatMessage[];
+  /** Last `todo` snapshot on the branch; absent when the tool was never used. */
+  todos?: ChatTodosSnapshot;
+}
+
+/**
+ * Converts the active branch into chat messages.
+ *
+ * Every `message` entry becomes a chat message. `compaction` and
+ * `branch_summary` entries become a divider message instead of being dropped,
+ * and no history is hidden: the divider only marks where the model's context
+ * starts (decision P2).
+ */
 function convertActiveBranch(
   entries: PiEntry[],
   branchLeafId?: string | null,
-): ChatMessage[] {
-  if (!entries.length) return [];
+): BranchConversion {
+  if (!entries.length) return { messages: [] };
 
   const byId = new Map(entries.map((entry) => [entry.id, entry]));
   const branch: PiEntry[] = [];
@@ -138,13 +163,28 @@ function convertActiveBranch(
   }
   branch.reverse();
 
+  const branchIndexById = new Map(
+    branch.map((entry, index) => [entry.id, index] as const),
+  );
+
   const toolResults = new Map<
     string,
     { result: unknown; isError: boolean; toolName?: string }
   >();
+  let todoSource: { details: TodoDetails; updatedAt: number } | undefined;
   for (const entry of branch) {
     const message = entry.message;
-    if (entry.type !== "message" || message?.role !== "toolResult") continue;
+    if (entry.type !== "message" || !message) continue;
+    // The `todo` extension returns its complete state on every successful call,
+    // so the last matching result on the branch is the state. Only the tool
+    // name and the documented `details` shape are required.
+    if (message.toolName === "todo" && isTodoDetails(message.details)) {
+      todoSource = {
+        details: message.details,
+        updatedAt: entryWrittenAt(entry) ?? 0,
+      };
+    }
+    if (message.role !== "toolResult") continue;
     if (!message.toolCallId) continue;
     toolResults.set(message.toolCallId, {
       result: toolResultValue(message.content),
@@ -153,23 +193,45 @@ function convertActiveBranch(
     });
   }
 
+  // Only the surviving snapshot is projected and size-checked, so a long
+  // session with hundreds of `todo` calls does not pay for the discarded ones.
+  const todos = todoSource
+    ? buildTodoSnapshot(todoSource.details, todoSource.updatedAt)
+    : undefined;
+
   const reasoningDurations = reasoningDurationsByEntry(branch);
 
-  return branch.flatMap((entry): ChatMessage[] => {
+  // Messages and dividers are placed by their position in the branch. A
+  // divider sorts before the entry it announces, so a message uses rank 1 and a
+  // divider rank 0; the sort is stable, so several dividers at the same
+  // boundary keep their branch order.
+  type Slot =
+    | { boundary: number; rank: 1; message: ChatMessage }
+    | {
+        boundary: number;
+        rank: 0;
+        entry: PiEntry;
+        dividerKind: ChatDividerKind;
+      };
+
+  const slots: Slot[] = [];
+  branch.forEach((entry, entryIndex) => {
     const message = entry.message;
-    if (entry.type !== "message" || !message) return [];
-    if (message.role !== "user" && message.role !== "assistant") return [];
+    if (entry.type !== "message" || !message) return;
+    if (message.role !== "user" && message.role !== "assistant") return;
 
     const content = attachReasoningDuration(
       convertContent(message.content, toolResults),
       reasoningDurations.get(entry.id),
     );
-    if (!content.length) return [];
+    if (!content.length) return;
 
     const entryTimestamp = Date.parse(entry.timestamp ?? "");
 
-    return [
-      {
+    slots.push({
+      boundary: entryIndex,
+      rank: 1,
+      message: {
         id: entry.id,
         role: message.role,
         createdAt:
@@ -184,8 +246,123 @@ function convertActiveBranch(
           ? { status: statusFromStopReason(message.stopReason) }
           : {}),
       },
-    ];
+    });
   });
+
+  branch.forEach((entry, entryIndex) => {
+    const dividerKind = dividerKindFor(entry);
+    if (!dividerKind) return;
+
+    // Decision P1: the compaction divider marks the semantic boundary, i.e. the
+    // first entry that stays in the model's context. `firstKeptEntryId` may be
+    // missing or live on another branch; then the divider falls back to the
+    // position of the compaction entry itself instead of failing.
+    const keptIndex =
+      dividerKind === "compaction" && typeof entry.firstKeptEntryId === "string"
+        ? branchIndexById.get(entry.firstKeptEntryId)
+        : undefined;
+
+    slots.push({
+      boundary: keptIndex ?? entryIndex,
+      rank: 0,
+      entry,
+      dividerKind,
+    });
+  });
+
+  slots.sort(
+    (left, right) => left.boundary - right.boundary || left.rank - right.rank,
+  );
+
+  const messages: ChatMessage[] = [];
+  slots.forEach((slot, index) => {
+    if (slot.rank === 1) {
+      messages.push(slot.message);
+      return;
+    }
+
+    /** Timestamp of the nearest real message, used to keep the divider where it
+     * was inserted: `mergeRealtime`/`mergePendingUserMessages` re-sort messages
+     * by `createdAt`, so a marker carrying the (later) compaction time would be
+     * pushed below the messages it belongs before. */
+    const neighbourAt = (direction: -1 | 1): number | undefined => {
+      for (
+        let cursor = index + direction;
+        cursor >= 0 && cursor < slots.length;
+        cursor += direction
+      ) {
+        const candidate = slots[cursor];
+        if (candidate.rank === 1) {
+          const at = validTimestamp(candidate.message.createdAt);
+          if (at !== undefined) return at;
+        }
+      }
+      return undefined;
+    };
+
+    messages.push(
+      dividerMessage(
+        slot.entry,
+        slot.dividerKind,
+        neighbourAt(1) ?? neighbourAt(-1) ?? entryWrittenAt(slot.entry) ?? 0,
+      ),
+    );
+  });
+
+  return { messages, todos };
+}
+
+function dividerKindFor(entry: PiEntry): ChatDividerKind | undefined {
+  if (entry.type === "compaction") return "compaction";
+  if (entry.type === "branch_summary") return "branch-summary";
+  return undefined;
+}
+
+/**
+ * A divider renders as its own assistant message so that it lands between the
+ * messages it splits and can also break a `Worked for` group in two (the group
+ * boundary is a divider part, see `ChatView`). `createdAt` is the timestamp of
+ * the message next to it (ordering anchor, see above); `at` on the part is the
+ * real timestamp of the compaction / branch summary entry.
+ */
+function dividerMessage(
+  entry: PiEntry,
+  kind: ChatDividerKind,
+  createdAt: number,
+): ChatMessage {
+  const at = entryWrittenAt(entry) ?? 0;
+  const tokensBefore =
+    typeof entry.tokensBefore === "number" &&
+    Number.isFinite(entry.tokensBefore) &&
+    entry.tokensBefore > 0
+      ? entry.tokensBefore
+      : undefined;
+  const details = isRecord(entry.details) ? entry.details : null;
+  const modifiedFiles = stringArray(details?.modifiedFiles);
+  const readFiles = stringArray(details?.readFiles);
+
+  return {
+    id: `divider:${entry.id}`,
+    role: "assistant",
+    createdAt,
+    content: [
+      {
+        type: "divider",
+        kind,
+        summary: typeof entry.summary === "string" ? entry.summary : "",
+        ...(tokensBefore === undefined ? {} : { tokensBefore }),
+        ...(modifiedFiles ? { modifiedFiles } : {}),
+        ...(readFiles ? { readFiles } : {}),
+        at,
+      },
+    ],
+  };
+}
+
+function stringArray(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const strings = value.filter((entry): entry is string => typeof entry === "string");
+  return strings.length ? strings : undefined;
 }
 
 /**

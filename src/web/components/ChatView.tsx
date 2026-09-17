@@ -19,8 +19,11 @@ import {
   Check,
   ChevronRight,
   CircleAlert,
+  CircleCheck,
+  CircleDashed,
   Clock3,
   Copy,
+  ListChecks,
   LoaderCircle,
   RefreshCw,
   Square,
@@ -65,15 +68,19 @@ import {
 } from "./ChatAttachments";
 import { isPaneActive } from "../../shared/pane-activity";
 import type {
+  ChatDividerKind,
   ChatJsonObject,
   ChatMessage,
   ChatPart,
   ChatRealtimeState,
   ChatSnapshot,
+  ChatTodosSnapshot,
   PaneSummary,
   PromptDeliveryEvent,
   PromptDeliveryStatus,
   PromptTransport,
+  TodoTask,
+  TodoTaskStatus,
 } from "../../shared/protocol";
 
 type ReasoningActivityItem = {
@@ -102,6 +109,29 @@ type ActivityRenderItem =
   | ActivityItem
   | { type: "tool-group"; id: string; items: ToolActivityItem[] };
 
+/** One context boundary from the transcript, as the reader produced it. */
+interface DividerPartData {
+  kind: ChatDividerKind;
+  summary: string;
+  tokensBefore?: number;
+  modifiedFiles?: string[];
+  readFiles?: string[];
+  at: number;
+}
+
+/**
+ * Raw chat parts that assistant-ui accepts unchanged. A `divider` is never
+ * rendered as a raw part: it always becomes a `data-divider` part, which is
+ * also what makes it invisible to `toActivityItem`.
+ */
+type DisplayChatPart = Exclude<ChatPart, { type: "divider" }>;
+
+type DisplayPart =
+  | DisplayChatPart
+  | { type: "data-divider"; data: DividerPartData }
+  | { type: "data-activity"; data: ActivityGroupData }
+  | { type: "data-delivery"; data: DeliveryPartData };
+
 interface ActivityGroupData {
   /** Stable identifier for the expansion state (decision D5). */
   id: string;
@@ -109,11 +139,6 @@ interface ActivityGroupData {
   durationMs?: number;
   items: ActivityItem[];
 }
-
-type DisplayPart =
-  | ChatPart
-  | { type: "data-activity"; data: ActivityGroupData }
-  | { type: "data-delivery"; data: DeliveryPartData };
 
 type PendingDeliveryState =
   | "sending"
@@ -825,6 +850,7 @@ export function ChatView({
                 {deliveryError.message}
               </div>
             )}
+            <TodoStatusBar todos={chat.todos} />
             <ComposerPrimitive.Root className="chat-composer">
               <ComposerPrimitive.AttachmentDropzone className="composer-dropzone">
                 <ComposerAttachments />
@@ -1016,7 +1042,7 @@ function AssistantMessage() {
           Image: ChatImagePart,
           Reasoning: ReasoningPart,
           tools: { Fallback: ToolFallback },
-          data: { by_name: { activity: ActivityGroup } },
+          data: { by_name: { activity: ActivityGroup, divider: ChatDivider } },
         }}
       />
     </MessagePrimitive.Root>
@@ -1386,6 +1412,279 @@ function formatValue(value: unknown): string {
   }
 }
 
+/**
+ * Maximum file names listed per list inside a divider detail; the rest is only
+ * counted (`…另有 N 个`), because a real compaction can touch dozens of files.
+ */
+const DIVIDER_FILE_NAME_LIMIT = 12;
+
+/**
+ * One context boundary (`compaction` / `branch_summary`) as a labelled rule.
+ *
+ * The summary and the file lists stay folded: real summaries are 7-9k
+ * characters. Nothing is invented — without a summary the marker is a plain
+ * rule, and without a timestamp no time is shown.
+ */
+function ChatDivider({ data }: DataMessagePartProps<DividerPartData>) {
+  const divider = data as DividerPartData;
+  const [open, setOpen] = usePanelOpenState(dividerPanelKey(divider));
+  const modifiedFiles = divider.modifiedFiles ?? [];
+  const readFiles = divider.readFiles ?? [];
+  const hasSummary = divider.summary.trim().length > 0;
+  const hasFiles = modifiedFiles.length > 0 || readFiles.length > 0;
+  const hasDetail = hasSummary || hasFiles || validTimestamp(divider.at) !== undefined;
+
+  const rule = (
+    <>
+      <span className="divider-rule" aria-hidden="true" />
+      <span className="divider-label">
+        {hasDetail && <ChevronRight className="divider-chevron" size={13} />}
+        {dividerLabel(divider)}
+      </span>
+      <span className="divider-rule" aria-hidden="true" />
+    </>
+  );
+
+  if (!hasDetail) {
+    return <div className={`chat-divider ${divider.kind}`}>{rule}</div>;
+  }
+
+  return (
+    <details
+      className={`chat-divider ${divider.kind}`}
+      open={open}
+      onToggle={(event) => setOpen(event.currentTarget.open)}
+    >
+      <summary>{rule}</summary>
+      <div className="divider-detail">
+        {hasSummary && (
+          <TextMessagePartProvider text={divider.summary}>
+            <MarkdownTextPrimitive
+              className="markdown-body"
+              smooth={false}
+              {...markdownShared}
+            />
+          </TextMessagePartProvider>
+        )}
+        {hasFiles && (
+          <div className="divider-files">
+            {modifiedFiles.length > 0 && (
+              <span className="divider-file-line">
+                {dividerFileListLabel("涉及文件", modifiedFiles)}
+              </span>
+            )}
+            {readFiles.length > 0 && (
+              <span className="divider-file-line">
+                {dividerFileListLabel("已读文件", readFiles)}
+              </span>
+            )}
+          </div>
+        )}
+        {validTimestamp(divider.at) !== undefined && (
+          <span className="divider-time">{formatDateTime(divider.at)}</span>
+        )}
+      </div>
+    </details>
+  );
+}
+
+/**
+ * Expansion state key of one divider. The timestamp of the compaction entry is
+ * stable for the life of the session, so the state survives re-renders; two
+ * dividers of the same kind without a timestamp share one flag, which is
+ * harmless because they are degenerated markers.
+ */
+function dividerPanelKey(divider: DividerPartData): string {
+  return `divider:${divider.kind}:${divider.at}`;
+}
+
+function dividerLabel(divider: DividerPartData): string {
+  const label = [divider.kind === "compaction" ? "上下文已压缩" : "分支摘要"];
+  if (divider.tokensBefore !== undefined) {
+    label.push(`压缩前 ${formatCount(divider.tokensBefore)} tokens`);
+  }
+  if (divider.summary.length > 0) {
+    label.push(`摘要 ${formatSummarySize(divider.summary.length)}`);
+  }
+  return label.join(" · ");
+}
+
+function dividerFileListLabel(label: string, files: string[]): string {
+  const shown = files.slice(0, DIVIDER_FILE_NAME_LIMIT).join("、");
+  const hidden = files.length - DIVIDER_FILE_NAME_LIMIT;
+  return `${label} ${files.length}：${shown}${hidden > 0 ? ` …另有 ${hidden} 个` : ""}`;
+}
+
+/** `111867` -> `111,867`. */
+function formatCount(value: number): string {
+  return String(Math.round(value)).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+}
+
+/** Truncated to one decimal, so 8986 characters read as `8.9k 字`. */
+function formatSummarySize(characters: number): string {
+  if (characters < 1_000) return `${characters} 字`;
+  return `${(Math.floor(characters / 100) / 10).toFixed(1)}k 字`;
+}
+
+function formatDateTime(at: number): string {
+  const date = new Date(at);
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return [
+    `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`,
+    `${pad(date.getHours())}:${pad(date.getMinutes())}`,
+  ].join(" ");
+}
+
+/** Display order and titles of the todo groups (in_progress first). */
+const TODO_GROUP_ORDER = ["in_progress", "pending", "completed"] as const;
+
+type TodoGroupStatus = (typeof TODO_GROUP_ORDER)[number];
+
+const TODO_GROUP_TITLES: Record<TodoGroupStatus, string> = {
+  in_progress: "进行中",
+  pending: "待办",
+  completed: "已完成",
+};
+
+/**
+ * Order and wording of the folded count line, which reads like a summary of the
+ * remaining work: `待办 3 · 进行中 1 · 完成 12`.
+ */
+const TODO_COUNT_ORDER = ["pending", "in_progress", "completed"] as const;
+
+const TODO_COUNT_LABELS: Record<TodoGroupStatus, string> = {
+  pending: "待办",
+  in_progress: "进行中",
+  completed: "完成",
+};
+
+/**
+ * Collapsible todo bar above the composer.
+ *
+ * It mirrors what the `todo` extension reports for this session: every task
+ * whose status is not `deleted` (tombstones are never shown). An empty list —
+ * including a snapshot that had to be degraded for size — renders nothing at
+ * all instead of an empty container. The list refreshes with the existing 1.5s
+ * chat poll; there is no separate push channel.
+ */
+function TodoStatusBar({ todos }: { todos?: ChatTodosSnapshot }) {
+  const tasks = useMemo(
+    () => (todos?.tasks ?? []).filter((task) => task.status !== "deleted"),
+    [todos],
+  );
+  const [open, setOpen] = usePanelOpenState(TODO_PANEL_KEY);
+  if (!tasks.length) return null;
+
+  const counts: Record<TodoGroupStatus, number> = {
+    in_progress: 0,
+    pending: 0,
+    completed: 0,
+  };
+  for (const task of tasks) counts[todoGroupStatus(task.status)] += 1;
+  const byId = new Map(tasks.map((task) => [task.id, task]));
+
+  return (
+    <details
+      className="chat-todo-bar"
+      open={open}
+      onToggle={(event) => setOpen(event.currentTarget.open)}
+    >
+      <summary>
+        <ListChecks className="todo-icon" size={14} aria-hidden="true" />
+        <span className="todo-counts">{todoCountsLabel(counts)}</span>
+        <ChevronRight className="todo-chevron" size={14} aria-hidden="true" />
+      </summary>
+      <div className="todo-list">
+        {TODO_GROUP_ORDER.map((status) => {
+          const groupTasks = tasks.filter(
+            (task) => todoGroupStatus(task.status) === status,
+          );
+          if (!groupTasks.length) return null;
+          return (
+            <section key={status} className={`todo-group ${status}`}>
+              <h4>
+                {TODO_GROUP_TITLES[status]}
+                <span className="todo-group-count">{groupTasks.length}</span>
+              </h4>
+              <ul>
+                {groupTasks.map((task) => {
+                  const blocked = todoBlockedLabel(task, byId);
+                  return (
+                    <li key={task.id} className="todo-task">
+                      <TodoStatusIcon status={status} />
+                      <span className="todo-subject">{todoTaskLabel(task)}</span>
+                      {blocked && <span className="todo-blocked">{blocked}</span>}
+                    </li>
+                  );
+                })}
+              </ul>
+            </section>
+          );
+        })}
+      </div>
+    </details>
+  );
+}
+
+/** One flag per pane, like every other row in `../panelOpenState`. */
+const TODO_PANEL_KEY = "todo:bar";
+
+/**
+ * Maps a task status onto the three visible groups. Unknown statuses stay
+ * visible as pending work instead of being silently dropped.
+ */
+function todoGroupStatus(status: TodoTaskStatus): TodoGroupStatus {
+  if (status === "in_progress") return "in_progress";
+  if (status === "completed") return "completed";
+  return "pending";
+}
+
+/** `in_progress` shows the present participle when the task has one. */
+function todoTaskLabel(task: TodoTask): string {
+  return task.status === "in_progress" && task.activeForm
+    ? task.activeForm
+    : task.subject;
+}
+
+function todoCountsLabel(counts: Record<TodoGroupStatus, number>): string {
+  return TODO_COUNT_ORDER.filter((status) => counts[status] > 0)
+    .map((status) => `${TODO_COUNT_LABELS[status]} ${counts[status]}`)
+    .join(" · ");
+}
+
+/**
+ * Dependency note of an open task: a dependency that is still open blocks it,
+ * one that is completed does not, and a dependency that is not part of the
+ * snapshot (for example a tombstone) cannot be judged and is reported as
+ * unknown instead of being guessed.
+ */
+function todoBlockedLabel(
+  task: TodoTask,
+  byId: Map<number, TodoTask>,
+): string | undefined {
+  if (task.status === "completed" || !task.blockedBy?.length) return undefined;
+  const dependencies = task.blockedBy.map((id) => {
+    const dependency = byId.get(id);
+    const state =
+      dependency === undefined
+        ? "未知"
+        : dependency.status === "completed"
+          ? "已完成"
+          : "未完成";
+    return { id, state, blocking: state === "未完成" };
+  });
+  const list = dependencies.map(({ id, state }) => `#${id}（${state}）`).join("、");
+  return dependencies.some((dependency) => dependency.blocking)
+    ? `被阻塞：依赖 ${list}`
+    : `依赖 ${list}`;
+}
+
+function TodoStatusIcon({ status }: { status: TodoGroupStatus }) {
+  if (status === "completed") return <CircleCheck size={13} aria-hidden="true" />;
+  if (status === "in_progress") return <LoaderCircle size={13} aria-hidden="true" />;
+  return <CircleDashed size={13} aria-hidden="true" />;
+}
+
 function groupActivityTools(items: ActivityItem[]): ActivityRenderItem[] {
   const grouped: ActivityRenderItem[] = [];
   let index = 0;
@@ -1427,7 +1726,10 @@ function groupAssistantTurns(
   while (index < messages.length) {
     const message = messages[index];
     if (message.role === "user") {
-      grouped.push(message);
+      // User messages never carry a divider (the reader emits those as their own
+      // assistant message), but they are normalized anyway so that no raw
+      // divider part can ever reach assistant-ui.
+      grouped.push({ ...message, content: message.content.map(toDisplayPart) });
       turnStartedAt = message.createdAt;
       index += 1;
       continue;
@@ -1449,61 +1751,94 @@ function groupAssistantTurns(
   return grouped;
 }
 
+/**
+ * Builds the single display message of one assistant turn.
+ *
+ * The turn is split into as many `Worked for` groups as there are dividers
+ * between its work parts: a compaction in the middle of a turn must read as
+ * `Worked for` → rule → `Worked for`, while a turn without a divider keeps its
+ * single group exactly as before.
+ */
 function combineAssistantTurn(
   messages: ChatMessage[],
   turnStartedAt: number | undefined,
   running: boolean,
 ): DisplayMessage {
-  const parts = messages.flatMap((message) => message.content);
+  const parts = messages.flatMap((message) => message.content.map(toDisplayPart));
   const finalOutputIndex = findLastOutputIndex(parts);
   const activityLimit = finalOutputIndex >= 0 ? finalOutputIndex : parts.length;
-  const workItems = running
-    ? []
-    : parts
-        .slice(0, activityLimit)
-        .flatMap((part): ActivityItem[] => {
-          const activity = toActivityItem(part);
-          return activity ? [activity] : [];
-        });
+  // Divider-only messages carry no output and no duration of their own, so they
+  // must not stretch the turn: the compaction is written at an arbitrary moment
+  // relative to the messages around it.
+  const timedMessages = messages.filter((message) =>
+    message.content.some((part) => part.type !== "divider"),
+  );
   const lastMessage = messages.at(-1)!;
   const firstMessage = messages[0];
-  const startedAt = validTimestamp(turnStartedAt) ?? validTimestamp(firstMessage.createdAt) ?? 0;
-  const endedAt =
-    messages.reduce(
-      (latest, message) =>
-        Math.max(latest, validTimestamp(message.completedAt) ?? message.createdAt),
-      startedAt,
-    ) || startedAt;
-  const workPart: DisplayPart = {
-    type: "data-activity",
-    data: {
-      // Stable across the whole turn: the group keeps its expansion state while
-      // the turn is still growing (see `../panelOpenState`).
-      id: `work:${firstMessage.id}`,
-      kind: "work",
-      durationMs: Math.max(0, endedAt - startedAt),
-      items: workItems,
-    },
-  };
+  const startedAt =
+    validTimestamp(turnStartedAt) ??
+    validTimestamp(timedMessages[0]?.createdAt ?? firstMessage.createdAt) ??
+    0;
+  const endedAt = timedMessages.length
+    ? timedMessages.reduce(
+        (latest, message) =>
+          Math.max(latest, validTimestamp(message.completedAt) ?? message.createdAt),
+        startedAt,
+      ) || startedAt
+    : startedAt;
+  const durationMs = Math.max(0, endedAt - startedAt);
+  // Stable across the whole turn: the group keeps its expansion state while the
+  // turn is still growing (see `../panelOpenState`).
+  const workGroupId = (segment: number) =>
+    segment === 0 ? `work:${firstMessage.id}` : `work:${firstMessage.id}:${segment}`;
 
   const content: DisplayPart[] = [];
-  let workInserted = false;
-  parts.forEach((part, partIndex) => {
-    const belongsToWork =
-      !running && partIndex < activityLimit && isWorkPart(part);
-    if (belongsToWork) {
-      if (!workInserted) {
-        content.push(workPart);
-        workInserted = true;
-      }
-      return;
-    }
-    content.push(part);
-  });
+  const pushWorkGroup = (segment: number, items: ActivityItem[]) => {
+    content.push({
+      type: "data-activity",
+      data: { id: workGroupId(segment), kind: "work", durationMs, items },
+    });
+  };
 
-  if (!running && !workInserted) {
-    const lastOutput = findLastOutputIndex(content);
-    content.splice(lastOutput >= 0 ? lastOutput : 0, 0, workPart);
+  if (running) {
+    // While the turn can still grow, every part renders on its own; the group is
+    // only built once the turn is over.
+    content.push(...parts);
+  } else {
+    let items: ActivityItem[] = [];
+    let segment = 0;
+    parts.forEach((part, partIndex) => {
+      if (part.type === "data-divider") {
+        if (items.length) {
+          pushWorkGroup(segment, items);
+          segment += 1;
+          items = [];
+        }
+        content.push(part);
+        return;
+      }
+      if (partIndex < activityLimit && isWorkPart(part)) {
+        const item = toActivityItem(part);
+        if (item) items.push(item);
+        return;
+      }
+      content.push(part);
+    });
+    if (items.length) pushWorkGroup(segment, items);
+
+    // A finished turn with no work rows still shows how long it ran — but only
+    // when it has a real message to time. A turn made of divider messages only
+    // gets no fabricated `Worked for` row.
+    if (
+      timedMessages.length > 0 &&
+      !content.some((part) => part.type === "data-activity")
+    ) {
+      const lastOutput = findLastOutputIndex(content);
+      content.splice(lastOutput >= 0 ? lastOutput : 0, 0, {
+        type: "data-activity",
+        data: { id: workGroupId(0), kind: "work", durationMs, items: [] },
+      });
+    }
   }
 
   return {
@@ -1513,6 +1848,25 @@ function combineAssistantTurn(
     ...(lastMessage.completedAt ? { completedAt: lastMessage.completedAt } : {}),
     content: groupConsecutiveTools(content),
     ...(lastMessage.status ? { status: lastMessage.status } : {}),
+  };
+}
+
+/**
+ * Turns a divider part into an assistant-ui data part, which is what renders the
+ * rule and what keeps it out of the activity rows (a divider is not work).
+ */
+function toDisplayPart(part: ChatPart): DisplayPart {
+  if (part.type !== "divider") return part;
+  return {
+    type: "data-divider",
+    data: {
+      kind: part.kind,
+      summary: part.summary,
+      ...(part.tokensBefore === undefined ? {} : { tokensBefore: part.tokensBefore }),
+      ...(part.modifiedFiles ? { modifiedFiles: part.modifiedFiles } : {}),
+      ...(part.readFiles ? { readFiles: part.readFiles } : {}),
+      at: part.at,
+    },
   };
 }
 
@@ -1573,6 +1927,11 @@ function toActivityItem(part: DisplayPart): ActivityItem | null {
   };
 }
 
+/**
+ * A divider is a boundary marker, never work: it is excluded from the group
+ * items here and from `toActivityItem` below (which returns `null` for it).
+ * Every display part that is not listed is not work either.
+ */
 function isWorkPart(part: DisplayPart): boolean {
   return (
     part.type === "text" ||
