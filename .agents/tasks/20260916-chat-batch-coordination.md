@@ -107,3 +107,23 @@
 - 批次累计 diff（相对 `0097dc4`）：26 files，+3542/−59；其中含规划基线的 `AGENTS.md`、`CLAUDE.md`、`.agents/tasks/`。
 - 已知冲突面：主工作区当前存在未提交的 `AGENTS.md`、`docs/README.md`、`docs/research-log.md` 改动，与批次规划基线中的同名文件区域重叠；合入 `main` 前必须先由开发者决定如何处理这些未提交改动。
 - `main` 仍未修改，未 push。
+
+## 批次收尾：合入 main 与合并态验证
+
+- 开发者批准：合入 `main`、暂不 push；先提交主工作区未提交改动；N1–N5 延后并记录为已知限制。
+- 主工作区改动提交：`96e0c16`（规则层 + 长期文档，17 个文件）。
+- 第二批复审新增限制记录：`9af6505`（`docs/prompt-delivery-observability.md` 第 10 节）。
+- 合入方式：`git merge --no-ff`，merge commit `8ded51b`。
+- 冲突 4 处，均为文档/记录，无源码冲突：
+  - `AGENTS.md`：取 main 侧（已是超集，含流程文档入口）；
+  - `docs/README.md`：索引行与结论行取并集；
+  - `.agents/tasks/20260916-markdown-link-rendering.md`、`.agents/tasks/20260916-prompt-delivery-observability.md`：取 integration 侧的 Worker 更新版本，而非 Planning stub。
+- 合并态验证（main）：
+  - `npm run typecheck` → PASS
+  - `npm test` → PASS（11 files / 60 tests，exit 0）
+  - `npm run build` → PASS（仅既有 chunk size warning）
+- 观察到一次偶发测试噪声（两次 `npm test` 中一次出现，exit 仍为 0）：
+  `Serialized Error: { code: 'ERR_INVALID_URL', input: '/api/panes/pane-1/chat' }`。
+  初步判断为 `ChatView` 在响应后用 `window.setTimeout(..., 250)` 触发 `loadChat`，该定时器未在 unmount 时清理；测试 `afterEach` 已 `unstubAllGlobals()`，于是原生的 Node fetch 收到相对 URL 而报错。属测试期偶发噪声，未影响测试通过，也未在第二轮集成态复现；待后续清理定时器时一并修掉。
+- 未执行：真实 Pi/Herdr 端到端、真实 HTTP/WS 与浏览器验收、browser-use/CUA 实测，均为 `NOT RUN`。
+- 未 push `origin/main`；Worker A/B 与 Reviewer 的 worktree、branch 全部保留未清理。
