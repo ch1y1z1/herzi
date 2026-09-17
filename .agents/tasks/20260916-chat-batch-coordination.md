@@ -134,3 +134,13 @@
 - 推送前检查：`git remote -v` 为 `git@github.com:ch1y1z1/herzi.git`；工作树 clean；待推送 19 个 commit、37 个文件（+7636/−60）。
 - 敏感信息扫描：未发现 API key、私钥、credential 文件或真实 Pi session 路径；命中的 “token” 均为设计讨论用词（token streaming、request token、integration token 等）。
 - 推送结果：`0097dc4..833070c main -> main`；fetch 后本地 `main` 与 `origin/main` 均为 `833070c`，无 ahead/behind。
+
+## 清理前的记录保全
+
+- 清理前盘点：本批次共 4 个 linked worktree（integration `wX`、Worker A `wY`、Worker B `wZ`、Reviewer `w0`）。
+- 逐个核对“分支中是否存在 main 没有的文件”，只有 review branch 上独有的两份复审记录：
+  - `.agents/tasks/20260916-chat-reliability-review.md`（第一轮 findings）
+  - `.agents/tasks/20260917-chat-reliability-rereview.md`（第二轮复审结论）
+  其余 Worker/Integration 内容均已通过 cherry-pick 或 merge 进入 main，无内容仅存于待清理分支。
+- 处理：把这两份复审记录从 review branch 复制到 main 的 `.agents/tasks/` 后再清理，避免审计记录随分支删除而丢失。
+- 说明：复审记录中引用的 review-branch commit SHA（如 `39b9423`、`52027bb`、`7ffe565`）在清理后不再可解析；其等价内容已存在于 main 的 `fa2c92f`、`9e62e8f` 与本文档中。
