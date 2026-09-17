@@ -33,7 +33,22 @@
 - 现流程：`herzi_audit`（`w17:p1`，分支 `agent-20260917-compaction-fix`，base `9af9eac`）做系统性自查 + 修复 → 由**独立 Reviewer** 复审 → 向开发者请求批准 → 才允许合入 main。
 - 批次记录：`.agents/tasks/20260917-compaction-todo-batch.md`
 
-### 4. 延后项（低优先；其中三项单独一轮，见开发者决策）
+### 4. 左侧侧边栏结构对齐 Herdr TUI（开发者 2026-09-17 提出，待澄清）
+
+- 开发者原话：**「左侧侧边栏结构有问题，应该参考 herdr tui 中的展示方式」**。
+- 现状（Herzi）：侧栏是「Workspace → 该 Workspace 下所有 Tab 的 Pane 平铺成一行」，每行只显示所属 Herdr Tab 名，用 `π` / 通用 agent / Terminal 图标区分环境（2026-09-03 的实现决定，见 `docs/README.md` 当前结论）。
+- 仓库里已核实、可直接用作对照的 Herdr 侧栏事实（`docs/herdr-worktree.md` §8）：
+  - `ui.sidebar.spaces.rows` 默认 `[["state_icon","workspace"],["branch","git_status"]]` —— 即 **每个 workspace 两行**：第一行状态图标 + workspace 名，第二行分支 + git 状态；
+  - 可用 token：`state_icon`、`state_text`、`workspace`、`branch`、`git_status`，以及 workspace metadata 上报的自定义 `$name`；
+  - `ui.sidebar.spaces.row_gap` 默认 `0`：worktree 父项与其缩进子项紧贴，空行只出现在 worktree 组与无关顶层 Space 之间；
+  - worktree 组：父仓库主 checkout + 缩进的 linked worktree 子项，是否属于 worktree 组以 `WorkspaceInfo.worktree` 字段有无为唯一判据。
+- 需要澄清的点（未决）：
+  1. 「结构有问题」具体指哪一层——Workspace/Tab/Pane 的层级与缩进、还是每行显示的信息（Tab 名 vs Pane 名 vs 分支/状态）、或是 worktree 分组缺失；
+  2. 是否要求与 Herdr TUI **逐项对齐**（包括两行式布局、`state_icon`/`state_text`、分支与 git 状态、worktree 缩进分组）；
+  3. 是否包含「Tab 作为中间层」—— Herdr TUI 侧栏以 workspace 为单位并展示分支，而 Herzi 当前把 Tab 摊平到每行。
+- 建议先做一次「现状 vs Herdr TUI」对照调研（可用本机 `herdr --default-config`、`herdr workspace list`、已有 `docs/herdr-api-schema.json`，必要时辅以 TUI 截图），再定方案；本项**不含实施授权**。
+
+### 5. 延后项（低优先；其中三项单独一轮，见开发者决策）
 
 来自 chat-reliability 批次：
 
@@ -45,14 +60,14 @@
 - `ChatView` 的 250ms `loadChat` 定时器未在 unmount 清理，导致偶发 `ERR_INVALID_URL` 测试噪声。
 - 工具展示增强的 `todo` 不参与阶段动词表决（Worker 自行判断并标注，待确认）。
 
-### 5. 真实验收缺口（需要用户授权环境）
+### 6. 真实验收缺口（需要用户授权环境）
 
 - Markdown 链接：hover / focus / 点击新 tab 的视觉与行为。
 - 投递可观测性：真实 Pane 的 claim/ack/expiry 显示、失败气泡与手动重试。
 - 工具展示增强：两列布局、等宽截断、diff 配色在真实浏览器中的观感。
 - 压缩分界与 todo 状态条（实现后）。
 
-### 6. 环境与仓库收尾
+### 7. 环境与仓库收尾
 
 - 推送 `origin/main`（当前领先若干 commit）。
 - 清理测试资源：Herdr pane `wW:p5`（agent `pi_cadence`）、`/tmp/pi-cadence-test`；`/tmp/memoh-ref` 参考克隆是否保留。
