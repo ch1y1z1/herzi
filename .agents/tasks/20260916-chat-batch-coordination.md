@@ -91,3 +91,19 @@
 - review candidate 更新：`52027bb`（= 7f75693 + 3e7c5e5），再追加第二轮任务定义 `05af238`。
 - 已通过 `herdr agent prompt w0:p1` 派发第二轮只读复审，确认状态为 `working`；Integrator 停止等待。
 - integration branch 仍不含 Worker B；`main` 未修改。
+
+## 正式集成与完整验证
+
+- 第二轮复审结论：F1 CLOSED、F2 CLOSED、F5 CLOSED、F3 文档与代码一致、延后清单完整、映射函数迁出无行为回归；无阻断问题，新增 5 条 Low/Info 观察（N1–N5）。
+- 复审记录：`7ffe565`（只修改第二轮复审任务文件）。
+- Worker B 集成结果（无冲突 cherry-pick）：
+  - `fa2c92f` = 55839d5 功能提交；
+  - `9e62e8f` = 3e7c5e5 findings 修复提交。
+- 集成态完整验证：
+  - `npm run typecheck` → PASS；
+  - `npm test` → PASS（11 files / 60 tests）；
+  - `npm run build` → PASS（仅既有 >500 kB chunk warning）。
+- 未运行的真实验收：真实 Pi/Herdr Pane 端到端、真实 HTTP/WS 端到端、浏览器视觉与 hover/focus/new-tab 验收、CUA 或 browser-use 实测，均为 `NOT RUN`。
+- 批次累计 diff（相对 `0097dc4`）：26 files，+3542/−59；其中含规划基线的 `AGENTS.md`、`CLAUDE.md`、`.agents/tasks/`。
+- 已知冲突面：主工作区当前存在未提交的 `AGENTS.md`、`docs/README.md`、`docs/research-log.md` 改动，与批次规划基线中的同名文件区域重叠；合入 `main` 前必须先由开发者决定如何处理这些未提交改动。
+- `main` 仍未修改，未 push。
