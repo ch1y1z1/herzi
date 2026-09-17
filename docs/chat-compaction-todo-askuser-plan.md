@@ -192,7 +192,8 @@ details: {
 
 **不需要重建状态机**：只要取**最后一个 `todo` 工具结果的 `details.tasks`** 即可，和该包 replay 的语义一致。
 
-- **数据层**：`PiSessionReader` 在收集 toolResults 时，对 `toolName === "todo"` 额外保留一份结构化快照（`tasks` + `nextId`）；`ChatSnapshot` 增加可选字段（例如 `todos?: { tasks: TodoTask[]; updatedAt: number }`）。需要给快照设大小上限（实测最大 56 项，序列化约 10KB 量级），超限时只保留计数并降级。
+- **数据层**：`PiSessionReader` 在收集 toolResults 时，对 `toolName === "todo"` 额外保留一份结构化快照（`tasks` + `nextId`）；`ChatSnapshot` 增加可选字段（例如 `todos?: { tasks: TodoTask[]; updatedAt: number }`）。需要给快照设大小上限（实测最大 56 项，序列化约 10KB 量级）。
+- **超限时的行为（已确认，F3）**：上限为 **128 KiB**（约合 1800+ 项，实测真实上限 56 项，实际不可达），超限时 **整条不渲染**（快照降级为 `{ tasks: [], truncated: true }`），**不显示计数**。理由：快照本身已被判为不可信，再显示一个来自它的数字会变成误导；少一块 UI 面也比给一个不可靠的数好。本节原先写的“只保留计数并降级”已按实现修正（2026-09-17，开发者确认）。
 - **展示**：Chat 顶部或 composer 上方放一条**可折叠的 todo 状态条**：
   - 折叠态：`待办 3 · 进行中 1 · 完成 12`（只显示非零项 + 进度比例）；
   - 展开态：按状态分组列出任务（`in_progress` 用 `activeForm` 文案），`pending` 显示被 `blockedBy` 阻塞的标记；`completed` 默认折叠或只显示最近若干条；tombstone 不显示。

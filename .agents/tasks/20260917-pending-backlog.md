@@ -23,15 +23,13 @@
 - 合入后完整验证：`typecheck` PASS、`npm test` 15 files / **117 tests** PASS、`build` PASS。已推送 `origin/main` = `dc8282c`。
 - 未验证：真实浏览器视觉验收 `NOT RUN`。
 
-### 3. 压缩分界 + todo 状态条（已撤回，正在重做）
+### 3. 压缩分界 + todo 状态条（已合入 main）
 
-- 方案：`docs/chat-compaction-todo-askuser-plan.md`（§8 已记录确认结果）
-- 已确认范围：压缩分界（语义边界、横线 + 可展开摘要与文件列表、作为组边界）+ todo 状态条（composer 上方可折叠）。
-- 已确认不做：压缩进行中实时提示；`todo` 继续不参与汇总与阶段动词。
-- **暂缓**：`ask_user_question` 全部（含只读展示）。
-- **事故与重做**：首版实现 `9af9eac` 未经批准合入 main，随后发现回归（`Worked for` 组渲染到正文下方）并被开发者要求撤回；`git revert` 后 main = `99015ed`（保留独立 Reviewer 规则提交）。
-- 现流程：`herzi_audit`（`w17:p1`，分支 `agent-20260917-compaction-fix`，base `9af9eac`）做系统性自查 + 修复 → 由**独立 Reviewer** 复审 → 向开发者请求批准 → 才允许合入 main。
-- 批次记录：`.agents/tasks/20260917-compaction-todo-batch.md`
+- 方案：`docs/chat-compaction-todo-askuser-plan.md`（§4.2 已按开发者决定修正超限口径，§8 记录确认结果）
+- 最终实现：压缩分界（语义边界、横线 + 可折叠摘要与文件清单、作为 `Worked for` 组边界）+ todo 状态条（composer 上方可折叠，空/降级不占位）。
+- 过程：首版曾未经批准合入并被撤回 → 新 Worker 系统性自查 + 修复顺序回归 → **三轮独立复审**（结论均为可合入、无阻断）+ Integrator 用 browser-use 完成真实像素测量（展开时 footer 377px、预留 393px、遮挡 0；旧写死 176px 时约 216px 正文尾部被压住）。
+- 合入 commit：见 `61a80cc`（merge `review-20260917-compaction-fix`）；程序与证据全量记录在 `.agents/tasks/20260917-compaction-todo-batch.md`
+- 已显式接受的已知项：F-D（首帧视觉 NOT RUN）、F-D-1（`useLayoutEffect` 无回归护栏）、预留无上界（极窄窗口边界）、F-C（既有 flaky 断言）、F3–F9（下列第 5 项一并处理）。
 
 ### 4. 左侧侧边栏结构对齐 Herdr TUI（开发者 2026-09-17 提出，待澄清）
 
@@ -48,7 +46,10 @@
   3. 是否包含「Tab 作为中间层」—— Herdr TUI 侧栏以 workspace 为单位并展示分支，而 Herzi 当前把 Tab 摊平到每行。
 - 建议先做一次「现状 vs Herdr TUI」对照调研（可用本机 `herdr --default-config`、`herdr workspace list`、已有 `docs/herdr-api-schema.json`，必要时辅以 TUI 截图），再定方案；本项**不含实施授权**。
 
-### 5. 延后项（低优先；其中三项单独一轮，见开发者决策）
+### 5. 剩余 P3 与延后项（开发者决定：合并为一轮处理）
+
+- 来自压缩/todo 批次的 P3：F-C（`promptCalls()` 断言过滤过宽，负载下偶发失败，**既有问题**）、F4（`at:0` 分界共享展开状态）、F5（分界借用 `createdAt` 扩大去重键暴露面）、F6（todo 行数无上限）、F8（kept entry 非消息时横线顺延）、F9（turnActivity latch 信息项）、F-D-1（`useLayoutEffect` 无回归护栏）。
+- 来自 chat-reliability 批次的遗留：
 
 来自 chat-reliability 批次：
 

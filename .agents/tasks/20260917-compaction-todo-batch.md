@@ -233,3 +233,11 @@ HERZI_PORT=3041 npm start        # 生产模式：同一进程既服务 dist/web
 候选态验证（Integrator 实测）：`typecheck` PASS、`npm test` PASS（15 files / **166 tests**）、`npm run build` PASS。
 
 **第三轮聚焦复审**：已向 `herzi_reviewer2`（`w18:p1`）派发，确认 `working`。要求逐条判断 F-A/F-B/F-D/F-E 为「已闭合 / 未闭合 / 有条件闭合」并附证据，特别要求：F-A 必须自己删 `observer.observe(viewport)` 做变异确认；F-D 若 jsdom 无法区分则明确写"只能代码审阅确认、浏览器可见性 NOT RUN"，**若实现者写了无法证伪的假测试要直接指出**；F-E 要在非仓库根 cwd 下验证并确认读的是被测树 CSS。
+
+## 合入 main（2026-09-17，开发者批准）
+
+- 开发者批准：**合入 + 立即 push + 清理 w17/w18**；F3 口径选择**改文档**。
+- 合并前预演：`git merge-tree --write-tree main review-20260917-compaction-fix` → 退出 0，**无冲突**。
+- 合并：`git merge --no-ff review-20260917-compaction-fix` → **`61a80cc`**。带入：功能（压缩分界 + todo 状态条）、配套修复（顺序回归、F1、F2、F-A/F-B/F-D/F-E）、三轮复审记录（`20260917-compaction-review.md`、`-rereview.md`、`-rereview2.md`）与两份任务记录。
+- F3 文档口径修正：`docs/chat-compaction-todo-askuser-plan.md` §4.2 由「超限只保留计数并降级」改为与实现一致——**128 KiB 上限（约合 1800+ 项，实测上限 56 项，实际不可达），超限整条不渲染、不显示计数**，并写明理由（数字来自被判为不可信的快照，显示它会变成误导）。
+- 待办清单同步：第 3 项标记完成并登记全部已接受已知项；原「延后项」条目改为「剩余 P3 与延后项（合并为一轮）」。
