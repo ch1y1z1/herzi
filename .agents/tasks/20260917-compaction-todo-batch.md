@@ -35,8 +35,8 @@
 - 待办清单：[`20260917-pending-backlog.md`](./20260917-pending-backlog.md)。
 - 下一批候选：三项延后项（F11 投递状态行 CSS、flaky 定时器清理、N1 fail-open 映射）单独一轮；`ask_user_question` 待与开发者详谈后再定。
 
-## 影响本批次的全局约定（2026-09-17）
+## 全局约定更正（2026-09-17）
 
-- 开发者要求在全局 `~/.pi/agent/AGENTS.md` 增加一节「工具文案」：`todo` 的 `activeForm`（进行中那一句 spinner 简述）**永远用中文**，同列表里一起展示的 `subject` 同样用中文，其它面向展示的一句话描述也一律用中文。
-- 依据：`activeForm` 的官方定义是 "Present-continuous spinner label shown while status is in_progress"（见 `@juicesharp/rpiv-todo/tool/types.ts`），正是「一句话简述当前工作」那句话。
-- 对本批次的影响：**无代码影响** —— todo 状态条只是原样展示 `activeForm` / `subject`；该约定约束的是写这些字段的 agent，因此不需要打断当前 Worker。
+- 我最初误把开发者的「永远使用中文」理解为针对 `todo` 的 `activeForm`，并误加了独立的「工具文案」一节；开发者随后澄清：指的是**全局 `~/.pi/agent/AGENTS.md` 的「输出节奏」第 2 条**那句「过程中主动给阶段性文字」。
+- 已更正：删除误加的「工具文案」节，直接改第 2 条 —— 过程中的阶段性文字必须用中文，且仍然不是请求确认。
+- 与本批次的关系：无代码影响（todo 状态条与本约定无关）。当前文件为 4 节：全局要求、输出节奏、提问方式。
