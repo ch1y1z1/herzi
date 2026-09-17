@@ -396,6 +396,42 @@
 - <https://github.com/earendil-works/pi-mono/tree/main/packages/coding-agent>
 - <https://www.assistant-ui.com/docs/ui/Attachment>
 
+## 2026-09-15：Herdr Git worktree 能力梳理
+
+### 触发与范围
+
+- 用户要求详细介绍 Herdr 的 git worktree 相关内容。本轮为**只读调研**：未创建、打开或删除任何 worktree，未修改产品代码，未读取任何 pane 输出或私人会话正文。
+
+### 一手核查过程
+
+- 确认运行环境：`HERDR_ENV=1`，`herdr 0.8.2`（client/server 同版本），socket protocol 20，stable 渠道。
+- 用 `herdr worktree`（无子命令）取得该版本的真实用法；用 `herdr api schema --output` 重新导出协议 schema，并抽取 `WorktreeCreateParams` / `WorktreeOpenParams` / `WorktreeRemoveParams` / `WorktreeListParams` / `WorktreeInfo` / `WorktreeSourceInfo` / `WorkspaceWorktreeInfo` 及 `worktree_*` 事件与响应结果定义。
+- 用 `herdr --default-config` 取得 `[worktrees] directory`、`keys.new_worktree`（默认 `prefix+shift+g`）与 `open_worktree`/`remove_worktree`（默认未绑定）的真实默认值。
+- 在二进制字符串中核实错误码与 UI 文案（`dirty_worktree_requires_force`、`not_linked_worktree`、`ambiguous_worktree_branch`、`worktree_operation_in_progress`、`stale_worktree_operation`、`confirmation_required`、`Close worktree group?`、`Delete worktree checkout?`、`─ no matching worktrees` 等）。
+- 只读执行 `herdr worktree list` 与 `herdr workspace list`，记录实际 JSON 形状；确认当前工作目录为普通 checkout，`WorkspaceInfo.worktree` 在非 worktree workspace 上被省略而非置 null。
+
+### 关键结论
+
+- worktree 不是新容器类型，而是"带 Git provenance 的普通 workspace"，创建后与父仓库 workspace 组成 sidebar 的 Space / worktree group。
+- `worktree create` 命中已有本地分支则 checkout，否则从 `--base`（缺省 `HEAD`）新建；不给 `--path` 时落在 `<worktrees.directory>/<repo>/<branch-slug>`（`branch-slug` 规则未查证）。
+- `worktree remove` 只执行 `git worktree remove`，**从不删除分支**；脏 checkout 需 `--force`。
+- `worktree.create` / `worktree.remove` 是异步的，存在 `worktree_operation_in_progress` 与 `stale_worktree_operation`。
+- **版本差异已核实**：官方文档描述的 `--trust-repository`、`workspace close --group`、`close_group` 在本机 0.8.2 二进制中不存在（`strings` 逐项确认为 NO）；本机 `release-notes.json` 记录的是 0.9.0 内容，不可当作当前行为。
+- 已知缺陷：issue #2952 报告 linked worktree 的 builtin `branch` 侧栏 token 为空（0.8.0 报告，本机 0.8.2 未复现验证）。
+
+### 交付
+
+- 新增 [`herdr-worktree.md`](./herdr-worktree.md)：概念模型、CLI 契约、数据模型、事件、错误码、分组关闭语义、TUI 入口、配置、与 Herzi 的关系、未查证清单与来源。
+- 更新 [`README.md`](./README.md) 文档索引与当前结论。
+
+来源（访问日期 2026-09-15）：
+
+- 本机：`herdr --help` / `herdr worktree` / `herdr --default-config` / `herdr api schema` / `herdr worktree list` / `herdr workspace list` / `/Users/chiyizi/.local/bin/herdr` 字符串 / `~/.config/herdr/release-notes.json`
+- <https://herdr.dev/docs/cli-reference/>
+- <https://herdr.dev/docs/socket-api/>
+- <https://herdr.dev/docs/config-reference/>
+- <https://github.com/herdrdev/herdr/issues/2952>
+
 ## 2026-09-15：Chat 图片粘贴首轮实施复核
 
 - 实施采用既定双通道，没有改变单 runtime 决策：bridge v2 用 Pi extension API 直接发送 image content，离线时用受管 host path + Herdr text prompt。
@@ -405,3 +441,144 @@
 - bridge command long poll 增加 abort 释放，避免旧 runtime 断开后 waiter 抢先 claim 新命令导致图片消息丢失。
 - 为避免 server 尚未重启时新 hashed Web bundle立刻破坏既有 mutation，前端 token helper 对旧 server 的 `/api/request-token` 404 临时回退旧行为；新 server仍强制 token。
 - 完整实现和验证记录见 [`development-log.md`](./development-log.md) 与 [`image-paste-implementation-plan.md`](./image-paste-implementation-plan.md) 第 22 节。
+
+## 2026-09-15：Devin 首期与多 Agent 架构调研
+
+### 需求澄清
+
+- 用户确认首期目标是 **Herdr 中已经运行的 Devin CLI Pane**，不是 Devin Cloud API session，也不是由 Herzi 新建 ACP runtime。
+- 体验希望与当前 Pi Chat 一致；公开接口难以实现的能力可以单独商议。
+
+### 当前项目审计
+
+- `src/server/herdr-client.ts` 只缓存 Pi session path，未保留通用 `agent_session`/`terminal_id`。
+- `src/server/index.ts` 的 Chat、upload、prompt、cancel、bridge identity 多处硬编码 `pane.agent === "pi"`。
+- `src/web/App.tsx` 与 `ChatView.tsx` 同样按 Pi 判断 Chat 可用性和能力。
+- 结论：不能继续堆品牌条件分支，应先引入 Agent adapter、ownership 和 capability 模型；Pi parser/realtime 作为 Pi adapter 私有实现保留。
+
+### 一手资料结论
+
+- Herdr 官方已支持 `herdr integration install devin`；公开源码中的 Devin integration v2 通过 hooks 报告 exact native session id，并使用 `devin --resume <id>` 恢复。Devin 状态仍以 screen manifest 为权威，因为 hooks 不能覆盖 permission cancellation、interrupt 等全部转换。
+- Herdr `agent.prompt`、`agent.send_keys`、`agent.focus`、`agent.wait` 与 terminal observe/control 可以继续用于同一 Devin Pane，不需创建第二 runtime。
+- Devin 官方 hooks 提供 SessionStart、UserPromptSubmit、Pre/PostToolUse、PermissionRequest、Stop、PostCompaction、SessionEnd，并带 `session_id`/`prompt_id`；没有 assistant token delta、thinking delta 或历史 replay。
+- Devin stable changelog说明新版 Stop hook包含 `last_assistant_message`，但 lifecycle hook 字段表尚未同步列出；最低版本和真实 payload 必须通过 synthetic fixture 验证，不能直接假设。
+- Devin CLI 支持 `--export [PATH]`，每 turn 导出 ATIF；官方文档未提供本轮可依赖的完整 ATIF schema，且已运行 Pane 无法补加启动参数，因此只能作为 Herzi 新建 session 的可选 history reconciliation。
+- `devin acp` 通过 ACP 提供 message chunks、tool、permission、elicitation、cancel 和 history load/resume，是 rich client 的最佳接口；但它要求 Herzi 启动另一个 subprocess，不是旁观已有 TUI 的接口，首期不能并发 load/resume 活跃 session。
+- Devin Cloud v3 API 提供 session CRUD、flat messages、状态与 attachment；官方 common flow要求 polling，本轮未找到 session webhook/token/tool stream。它属于未来 remote-api provider，不解决本地 Pane。
+- ACP TypeScript SDK `@agentclientprotocol/sdk` 为 Apache-2.0；上游当前 package 文件标记 1.4.0，stable 入口为 ACP v1，v2 仍 experimental。
+- 为后续 Codex 只做了边界核实：Herdr 可报告 Codex session id；Codex 官方 app-server 有 thread read/list/resume、turn/item stream、approval 与 interrupt。Codex 应有独立 adapter，不能复制 Devin 的弱 hook 假设。
+
+### 推荐决策
+
+- 首期采用 `terminal-backed/devin adapter + 独立 companion hook journal`。
+- companion 必须安装在 Herdr managed hook 旁边，不能修改会被 Herdr update 覆盖的脚本。
+- status authority = Herdr；Devin Chat history = 明确标记 derived/partial 的 Herzi journal；Terminal = 完整兜底。
+- prompt 继续走 Herdr；cancel 策略（`Ctrl+C` 或 `Esc Esc`）先在专用 Pane 验证；approval/question 首期只提示切 Terminal。
+- event ingress 使用独立 integration credential + Pane/session 双校验；journal/spool 私有权限、有限保留、正文不进普通日志。
+- assistant token streaming、安装前旧历史、原生图片和结构化审批不是首期可诚实承诺的能力。若这些成为硬要求，应改评 Herzi-owned ACP 模式。
+
+### 未查证项
+
+- 当前用户环境的 Devin CLI 版本、登录状态、Herdr Devin integration 安装状态均未读取/执行检查。
+- Stop payload、tool call id、ATIF 写入模式/schema、prompt working 语义、cancel 按键和 host-path 图片均待 P0 synthetic 验证。
+- 本轮没有读取用户 Devin config、session DB、真实 Pane 或私人 transcript，也没有调用带 credential 的 Devin API。
+
+### 交付
+
+- 新增 [`devin-integration-research-report.md`](./devin-integration-research-report.md)。
+- 新增 [`multi-agent-architecture-and-devin-plan.md`](./multi-agent-architecture-and-devin-plan.md)。
+- 更新 [`README.md`](./README.md) 文档索引与当前结论。
+- 本轮只形成调研、架构和实施方案，未修改产品代码、未安装 Devin/Herdr integration、未启动 Devin session。
+
+来源（访问日期 2026-09-15）：
+
+- <https://docs.devin.ai/cli>
+- <https://docs.devin.ai/cli/reference/commands>
+- <https://docs.devin.ai/cli/extensibility/hooks/overview>
+- <https://docs.devin.ai/cli/extensibility/hooks/lifecycle-hooks>
+- <https://docs.devin.ai/cli/changelog/stable>
+- <https://docs.devin.ai/api-reference/overview>
+- <https://docs.devin.ai/api-reference/common-flows>
+- <https://docs.devin.ai/api-reference/v3/sessions/post-organizations-sessions>
+- <https://agentclientprotocol.com/protocol/v1/overview>
+- <https://agentclientprotocol.com/protocol/v1/prompt-turn>
+- <https://agentclientprotocol.com/protocol/v1/tool-calls>
+- <https://agentclientprotocol.com/libraries/typescript>
+- <https://herdr.dev/docs/agents/>
+- <https://herdr.dev/docs/integrations/>
+- <https://herdr.dev/docs/socket-api/>
+- <https://herdr.dev/docs/session-state/>
+- <https://github.com/herdrdev/herdr/blob/master/src/integration/assets/devin/herdr-agent-state.sh>
+- <https://github.com/herdrdev/herdr/blob/master/src/detect/manifests/devin.toml>
+- <https://developers.openai.com/codex/app-server>
+
+## 2026-09-15：补充核查 Moshi 如何处理 Devin
+
+用户追问 Moshi 如何完成同类接入。重新读取 Moshi 当前官方 Chat View、Hooks、Debug Chat View 与 gateway 文档后确认：
+
+- Moshi 对 Tier A agent 的实现不是用 hooks 拼 transcript，也不是 ACP。`moshi-hook` 负责把 tmux/Herdr Pane 映射到 exact native session/transcript；host gateway 读取 agent 本地 transcript，经 `/v1/transcripts` WebSocket 发 `backlog` 与后续完整 JSONL row `append`；app 端 agent-specific parser 再投影为消息、tool card、plan、question 和图片。
+- Prompt 与可安全映射的 approval 通过 multiplexer 写回同一个 live TUI；无法确定回送方式的交互提示用户回 Terminal。
+- gateway 只监听 `127.0.0.1:24543`，app 通过已有 SSH connection 转发；完整 transcript 不经过 Moshi backend，hook 的小摘要/通知是另一条数据链。
+- **Moshi 当前并没有为 Devin CLI 实现 Native Chat View。** 官方 Tier A 列表不含 Devin，Tier C Terminal/TUI 列表才包含 Devin；Tier C 明确不承诺 hook、session detection、transcript parser 或 native resume。`/v1/transcripts` 的支持 source 列表也不含 Devin。
+- 这印证了本报告的关键限制：Devin 缺少 Moshi Tier A 模式所需的公开稳定 local transcript 接口。Herzi 的 companion hook journal 是自建 derived/partial history，比 Moshi 当前 Devin Tier C 更进一步，但不能冒充 agent-native transcript authority，必须先过 P0 synthetic 验证门。
+
+已把该结论补入 [`devin-integration-research-report.md`](./devin-integration-research-report.md) 和 [`multi-agent-architecture-and-devin-plan.md`](./multi-agent-architecture-and-devin-plan.md)。
+
+来源（访问日期 2026-09-15）：
+
+- <https://getmoshi.app/docs/chat-view>
+- <https://getmoshi.app/docs/hooks>
+- <https://getmoshi.app/docs/debug-chat-view>
+- <https://getmoshi.app/docs/debug-gateway>
+
+## 2026-09-16：Devin 本地数据库读取方案专项调研
+
+### 范围与隐私边界
+
+- 用户要求评估“读取 Devin 数据库”方案。
+- 本轮没有读取用户真实 Devin 配置、session DB、Pane 或 transcript。
+- 本机实验只下载官方公开 CLI artifact，在项目内临时目录设置隔离 `HOME`/XDG，执行 `devin list` 生成空白 synthetic DB；SHA-256 校验通过，实验结束后临时文件已删除。
+
+### 官方资料与公开 artifact 核查
+
+- 官方 current manifest 当时指向 `v3000.10.27`；验证的 macOS arm64 artifact SHA-256 为 `d25e50086b3f84286b6ca1a69f890331436ef9b757c937fa18f716fbef384edd`。
+- stable changelog直接提到 local/session database、SQLite corruption fix、旧 CLI 打开较新 DB 的兼容错误，以及 ACP dedicated database thread；但官方没有公开 DB path/schema/message JSON/第三方并发读取契约。
+- 公共二进制中确认存在 SQLite SQL、migration、WAL/busy timeout、`sessions.db-wal`/`sessions.db-shm` 和内部 `CHISEL_SESSION_DB`；最后一项没有文档，不能作为产品契约。
+
+### 隔离实验结果
+
+- 默认 macOS/Linux data path 实测为 `~/.local/share/devin/cli/sessions.db`；设置 `XDG_DATA_HOME` 时跟随 `$XDG_DATA_HOME/devin/cli/sessions.db`。
+- 空库表包括 `sessions`、`message_nodes`、`prompt_history`、`tool_call_state`、`subagent_heads`、`rendered_commits`、`app_state`、`refinery_schema_history`。
+- `message_nodes` 包含 `node_id/parent_node_id/chat_message/metadata`，说明历史是 forest，不是简单平面行；`sessions` 含 `main_chain_id`。
+- migration 从 V1 到 V17，覆盖 message forest、node metadata、shell context、rendered commits、workspace dirs、tool state、hidden、session metadata 和 subagent heads。
+- 空库关闭后 `journal_mode=delete`，但二进制明确包含 WAL 初始化与 sidecar 处理；因此 live runtime 必须动态探测并按 WAL-capable 处理，不能硬编码 journal mode。
+- 由于空库没有 turn，main-chain、fork/revert、compaction、tool、subagent、commit timing 和 `chat_message` JSON variant 均保持未查证。
+
+### 方案结论
+
+- 技术上可从 DB 补齐 companion 安装前的旧历史，但这是内部实现，不是稳定 transcript API。
+- 禁止对 live DB 使用 `immutable=1`；SQLite 官方说明文件实际变化时可能返回错误结果或 corruption。
+- 禁止只复制 `sessions.db`，也不建议依次复制 main/WAL/SHM；WAL 是持久状态的一部分，逐文件 copy 不是一致 snapshot。
+- 若进入实验，唯一推荐形态是 SQLite Online Backup API：短暂只读打开 source，分页复制到 Herzi `0600` 私有快照，再对完成快照使用 immutable/query-only parser。
+- importer 必须按 exact CLI version + ordered migration checksum + app state + required columns + synthetic JSON variants 做 allowlist；任何 mismatch fail closed。
+- 数据库只作为 feature-flagged history bootstrap/idle reconciliation；Herdr 状态 + hooks journal 仍是首期主链，Terminal 仍是交互 authority。
+
+### 计划更新
+
+- 新增 [`devin-local-database-research.md`](./devin-local-database-research.md)，记录证据、schema、方案矩阵、推荐架构、安全要求、compatibility gate 和 P0-DB 测试。
+- 更新 [`devin-integration-research-report.md`](./devin-integration-research-report.md)：把“完全拒绝 DB”修订为“默认不依赖，仅允许一致性快照实验”。
+- 更新 [`multi-agent-architecture-and-devin-plan.md`](./multi-agent-architecture-and-devin-plan.md)：新增 P0-DB 和可选 P6a SQLite snapshot bootstrap，ATIF 顺延为 P6b。
+- 更新 [`README.md`](./README.md) 索引与当前结论。
+- 未修改产品代码、未安装 dependency、未执行真实 Devin session 写入。
+
+来源（访问日期 2026-09-16）：
+
+- <https://docs.devin.ai/cli/reference/commands>
+- <https://docs.devin.ai/cli/changelog/stable>
+- <https://docs.devin.ai/cli/troubleshooting>
+- <https://static.devin.ai/cli/current/manifest.json>
+- <https://static.devin.ai/cli/3000.10.27/devin-3000.10.27-aarch64-apple-darwin.tar.gz>
+- <https://www.sqlite.org/wal.html>
+- <https://www.sqlite.org/backup.html>
+- <https://www.sqlite.org/uri.html>
+- <https://www.sqlite.org/pragma.html>
