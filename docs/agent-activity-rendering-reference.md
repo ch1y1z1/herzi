@@ -113,7 +113,36 @@ if (block.type === 'tool' || block.type === 'reasoning') {
    - 展开状态改为按稳定块标识持久，避免 turn 结束后重挂载把用户展开的块收起。
 3. 许可约束：Memoh 为 **AGPL-3.0**。以上只作为设计参考，Herzi 若实施应自行实现，不复制其源码或文案文件。
 
-## 5. 未决事项
+## 5. 过程中的“工作摘要”文本从哪里来
+
+结论：**来自提示词约束，而非代码**。
+
+Memoh 把一个工作区指令文件植入每个 agent 的容器工作区：`templates/workspace/AGENTS.md`（40 行）。它由 `internal/workspace/template_bootstrap.go` 的 `TemplateBootstrapper.Bootstrap` 从内嵌 FS（`workspacetemplates.WorkspaceFS()`，见 `internal/workspace/manager.go:138`）拷入 `/data/AGENTS.md`；注释明确“User-owned files are create-only”，即只在缺失时写入、不覆盖用户改动。
+
+其中 `## Communication` 一节直接规定了输出节奏：
+
+```
+- Before a task that needs lookups, file reads, or several steps, briefly say what you will do. Answer directly when you can.
+- Share a finding, stage result, change of approach, or blocker as it comes up, say what it means for the goal, then keep working. An update is not a request for confirmation.
+- Do not narrate every tool call, pad with "still working", or present internal reasoning as progress.
+- When done, give the result, then note what you verified, what is limited, and what is unfinished. Report only what actually happened.
+```
+
+即：**要求 agent 在过程中主动产出文字更新**（发现、阶段结果、换方案、阻塞），同时**禁止逐个工具调用报账**。这与 UI 模型是一套的：正因为第 2 节的分组规则不把正文收进过程组，这些中途更新才能立即出现在流中。
+
+代码侧未发现另一处重复该要求：`internal/` 下其余 system prompt 只涉及记忆压缩与上下文摘要（`internal/agent/context/compaction/prompt.go`、`internal/memory/memllm/client.go`）；Workspace 模板是唯一来源。
+
+### 5.1 对 Herzi 的含义
+
+- Herzi 的根 `AGENTS.md` 没有输出节奇（cadence）类规则，它的内容是关于协作流程与验证，而非“何时输出文字”。
+- 更关键的区别：**Herzi 展示的 agent 不读 Herzi 的 `AGENTS.md`**。一个 Pane 里的 Pi 会话读的是它自己的全局上下文文件（`~/.pi/agent/AGENTS.md`）加上从 cwd 向上逐层查找的 `AGENTS.md` 链（Pi 官方文档 `docs/sdk.md` 明确列出 Global context file (`AGENTS.md`) 与 Context files (`AGENTS.md` walking up from cwd)）。因此要让 Herzi 里的 agent 产出中途文字，应改的是**该 agent 自己的全局/项目指令**，不是 Herzi 的 UI 或仓库规则。
+- UI 侧无需改动：已核实 Herzi 会展示中途文本（运行中内联、完成后进入 `Worked for` 组并完整 Markdown 渲染）。
+
+### 5.2 代价
+
+把中途文字变成常态会增加消息数、token 消耗与时长，并可能让简短任务显得啰嗦，因此 Memoh 同时写了“不要逐个工具调用报账”与“不要在结尾编造过程”的护栏。若 Herzi 采用类似规则，建议一并保留这两条边界。
+
+## 6. 未决事项
 
 - 是否采纳该模型，以及采纳到什么程度，需用户决定；本文件不含实施授权。
 - 若要实现 reasoning 时长：需要确认 Pi 的 session entry 是否提供足够的相邻时间戳（Herzi 已确认 entry 时间戳单调且无重复，可作为近似来源），以及流式期间是否需要在客户端测量。
