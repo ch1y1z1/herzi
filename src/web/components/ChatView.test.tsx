@@ -1,6 +1,8 @@
 // @vitest-environment jsdom
 
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type {
@@ -1811,6 +1813,33 @@ describe("ChatView todo bar", () => {
     expect(bar.textContent).not.toContain("被阻塞");
   });
 
+  it("renders a snapshot that carries no nextId", async () => {
+    // `nextId` is never rendered, so a snapshot without it must behave like any
+    // other one (review finding F2).
+    stubChat([userMessage(), assistantMessage("a1", [{ type: "text", text: "hi" }])], false, {
+      updatedAt: TURN_STARTED_AT,
+      tasks: [
+        { id: 1, subject: "第一个任务", status: "in_progress", activeForm: "正在写测试" },
+        { id: 2, subject: "第二个任务", status: "pending" },
+      ],
+    });
+
+    render(<ChatView pane={pane} />);
+    await screen.findByText("hi");
+
+    const bar = await waitFor(() => {
+      const element = document.querySelector(".chat-todo-bar");
+      if (!element) throw new Error("the todo bar was not rendered");
+      return element as HTMLDetailsElement;
+    });
+    expect(cell(bar, ".todo-counts")).toBe("待办 1 · 进行中 1");
+
+    bar.open = true;
+    fireEvent(bar, new Event("toggle"));
+    expect(screen.getByText("正在写测试")).toBeTruthy();
+    expect(screen.getByText("第二个任务")).toBeTruthy();
+  });
+
   it("adds no bar or spacing for a pane that is not a Pi session", async () => {
     const codePane: PaneSummary = { ...pane, id: "pane-3", agent: "codex" };
     stubChat([userMessage(), assistantMessage("a1", [{ type: "text", text: "hi" }])], false);
@@ -1894,5 +1923,182 @@ describe("ChatView degraded snapshots", () => {
     expect(document.querySelectorAll(".chat-divider")).toHaveLength(1);
     expect(document.querySelector(".chat-todo-bar")).toBeNull();
     expect(landmarks()).toEqual(["group", "divider", "group"]);
+  });
+});
+
+describe("ChatView footer reservation", () => {
+  beforeEach(() => {
+    resetPanelOpenStores();
+    stubChat([], false);
+  });
+
+  afterEach(() => {
+    resetPanelOpenStores();
+  });
+
+  /** One live task, no `nextId`: enough to render the bar. */
+  function todoSnapshot() {
+    return {
+      updatedAt: TURN_STARTED_AT,
+      tasks: [{ id: 1, subject: "第一个任务", status: "pending" }],
+    };
+  }
+
+  function footerInsetVar(): string {
+    const viewport = document.querySelector(".chat-viewport") as HTMLElement;
+    return viewport.style.getPropertyValue("--chat-footer-inset");
+  }
+
+  /** jsdom lays nothing out, so both rects and heights are stubbed by hand. */
+  function stubRect(element: HTMLElement, top: number, bottom: number): void {
+    Object.defineProperty(element, "getBoundingClientRect", {
+      configurable: true,
+      value: () =>
+        ({
+          top,
+          bottom,
+          height: bottom - top,
+          left: 0,
+          right: 0,
+          width: 0,
+          x: 0,
+          y: top,
+          toJSON: () => ({}),
+        }) as DOMRect,
+    });
+  }
+
+  function chatMessages(): ChatMessage[] {
+    return [userMessage(), assistantMessage("a1", [{ type: "text", text: "hi" }])];
+  }
+
+  /**
+   * jsdom never runs a ResizeObserver, so the tests drive the observer by hand.
+   * Only callbacks registered for the footer are collected; assistant-ui registers
+   * one for the same element, and both callbacks only re-read it.
+   */
+  function stubResizeObserver(): Array<() => void> {
+    const footerCallbacks: Array<() => void> = [];
+    vi.stubGlobal(
+      "ResizeObserver",
+      class {
+        callback: ResizeObserverCallback;
+        constructor(callback: ResizeObserverCallback) {
+          this.callback = callback;
+        }
+        observe(target: Element) {
+          if (target.classList.contains("chat-footer")) {
+            footerCallbacks.push(() =>
+              this.callback([], this as unknown as ResizeObserver),
+            );
+          }
+        }
+        unobserve() {}
+        disconnect() {}
+      },
+    );
+    return footerCallbacks;
+  }
+
+  it("follows the space the fixed footer covers", async () => {
+    const footerCallbacks = stubResizeObserver();
+    stubChat(chatMessages(), false, todoSnapshot());
+
+    render(<ChatView pane={pane} />);
+    await screen.findByText("hi");
+
+    const viewport = document.querySelector(".chat-viewport") as HTMLElement;
+    const footer = document.querySelector(".chat-footer") as HTMLElement;
+    expect(footerCallbacks.length).toBeGreaterThan(0);
+    // Nothing has been laid out, so the conservative reservation has to hold.
+    expect(footerInsetVar()).toBe("496px");
+
+    // A collapsed footer: its top edge is 480px above the pane's bottom edge…
+    Object.defineProperty(footer, "offsetHeight", { value: 421, configurable: true });
+    stubRect(viewport, 100, 900);
+    stubRect(footer, 420, 841);
+    for (const notify of footerCallbacks) notify();
+    expect(footerInsetVar()).toBe("480px");
+
+    // …and an expanded todo bar moves that edge up, which the reservation has to
+    // follow; that is what kept the end of the transcript reachable.
+    stubRect(footer, 300, 721);
+    for (const notify of footerCallbacks) notify();
+    expect(footerInsetVar()).toBe("600px");
+  });
+
+  it("never reserves less than the previous constant", async () => {
+    const footerCallbacks = stubResizeObserver();
+    stubChat(chatMessages(), false);
+
+    render(<ChatView pane={pane} />);
+    await screen.findByText("hi");
+
+    const viewport = document.querySelector(".chat-viewport") as HTMLElement;
+    const footer = document.querySelector(".chat-footer") as HTMLElement;
+    // A footer that barely reaches over the pane's bottom edge must not shrink
+    // the reservation below what already shipped.
+    Object.defineProperty(footer, "offsetHeight", { value: 120, configurable: true });
+    stubRect(viewport, 100, 900);
+    stubRect(footer, 880, 1000);
+    for (const notify of footerCallbacks) notify();
+    expect(footerInsetVar()).toBe("176px");
+  });
+
+  it("reserves the conservative height while the footer reports no layout", async () => {
+    // jsdom reports every element as 0px tall, which is what an unmeasured or
+    // hidden footer looks like in a real browser too. A live observer may still
+    // correct the value later, so the reservation has to be conservative until
+    // it does: otherwise expanding the bar would hide transcript content.
+    const footerCallbacks = stubResizeObserver();
+    stubChat(chatMessages(), false, todoSnapshot());
+
+    render(<ChatView pane={pane} />);
+    await screen.findByText("hi");
+
+    expect(footerCallbacks.length).toBeGreaterThan(0);
+    const reserved = Number.parseInt(footerInsetVar(), 10);
+    // Base footer plus at least the list `max-height` the bar can reach.
+    expect(reserved).toBeGreaterThanOrEqual(176 + 260);
+    // Still just the bar: the interaction itself is unchanged.
+    const bar = document.querySelector(".chat-todo-bar") as HTMLDetailsElement;
+    expect(bar.open).toBe(false);
+  });
+
+  it("keeps the base reservation when the todo bar renders nothing", async () => {
+    stubChat(chatMessages(), false, {
+      updatedAt: TURN_STARTED_AT,
+      tasks: [{ id: 1, subject: "被删除的任务", status: "deleted" }],
+    });
+
+    const { rerender } = render(<ChatView pane={pane} realtime={realtimeTick(1)} />);
+    await screen.findByText("hi");
+
+    expect(document.querySelector(".chat-todo-bar")).toBeNull();
+    // No bar means nothing taller to reserve.
+    expect(footerInsetVar()).toBe("176px");
+
+    // The same holds when the session never used `todo` at all.
+    stubChat(chatMessages(), false);
+    rerender(<ChatView pane={pane} realtime={realtimeTick(2)} />);
+    await screen.findByText("hi");
+    expect(footerInsetVar()).toBe("176px");
+  });
+
+  it("keeps the stylesheet wired to the footer inset variable", () => {
+    // jsdom does not resolve `var()` in the cascade, so the contract between
+    // this component and the layout is asserted on the rule itself: without the
+    // `padding-bottom` below, the variable above would change nothing.
+    const source = readFileSync(
+      path.join(process.cwd(), "src/web/styles.css"),
+      "utf8",
+    );
+    const viewportRules = Array.from(
+      source.matchAll(/^\.chat-viewport \{([^}]*)\}/gm),
+      (match) => match[1] ?? "",
+    );
+    expect(viewportRules.join("\n")).toContain(
+      "padding-bottom: var(--chat-footer-inset, 176px)",
+    );
   });
 });

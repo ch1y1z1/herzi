@@ -510,6 +510,12 @@ button {
   overflow-y: auto;
   scroll-behavior: smooth;
   padding: 26px max(24px, calc((100% - 880px) / 2)) 176px;
+  /* The footer is a fixed overlay, so the transcript has to reserve the space it
+     covers explicitly. It used to be the constant above, which the todo bar can
+     more than double; `useChatFooterInset` in ChatView keeps the custom property
+     in sync with the space the footer really covers, and 176px stays as the value
+     before the first measurement and wherever nothing can be measured. */
+  padding-bottom: var(--chat-footer-inset, 176px);
   background:
     linear-gradient(#fafaf7 30%, rgb(250 250 247 / 0%)),
     #fafaf7;

@@ -9,7 +9,7 @@
  *
  * Nothing here invents data: unknown statuses are kept as-is (the UI groups
  * them with the pending work), unverified fields are dropped, and a snapshot
- * over the size budget is degraded to `{ nextId, updatedAt, tasks: [], truncated }`
+ * over the size budget is degraded to `{ nextId?, updatedAt, tasks: [], truncated }`
  * instead of being truncated to a partial list.
  */
 
@@ -20,18 +20,20 @@ export const TODO_SNAPSHOT_MAX_BYTES = 128 * 1024;
 
 export interface TodoDetails {
   tasks: unknown[];
-  nextId: number;
+  /** Numbered by the extension; Herzi never renders it, so it is not required. */
+  nextId?: unknown;
 }
 
 /**
- * Shape check for a `todo` tool result's `details`. The two fields the
- * extension documents as its persistence format are required; everything else
- * is optional and ignored.
+ * Shape check for a `todo` tool result's `details`.
+ *
+ * Only `tasks` is required. `nextId` used to be required too, which meant that a
+ * perfectly good snapshot was dropped — silently — whenever the extension did
+ * not report a numeric next id (review finding F2). The field is not part of any
+ * Herzi behaviour, so it cannot be allowed to gate one that is.
  */
 export function isTodoDetails(value: unknown): value is TodoDetails {
-  return (
-    isRecord(value) && Array.isArray(value.tasks) && typeof value.nextId === "number"
-  );
+  return isRecord(value) && Array.isArray(value.tasks);
 }
 
 /** Keeps only the verified fields of every task; drops malformed entries. */
@@ -70,9 +72,12 @@ export function buildTodoSnapshot(
   maxBytes: number = TODO_SNAPSHOT_MAX_BYTES,
 ): ChatTodosSnapshot {
   const tasks = projectTodoTasks(details.tasks);
-  const snapshot: ChatTodosSnapshot = { tasks, nextId: details.nextId, updatedAt };
+  // A non-numeric `nextId` is left out rather than invented or coerced: nothing
+  // in Herzi reads it, and a made-up number would be a claim about the extension.
+  const nextId = typeof details.nextId === "number" ? { nextId: details.nextId } : {};
+  const snapshot: ChatTodosSnapshot = { tasks, ...nextId, updatedAt };
   if (serializedBytes(snapshot) <= maxBytes) return snapshot;
-  return { tasks: [], nextId: details.nextId, updatedAt, truncated: true };
+  return { tasks: [], ...nextId, updatedAt, truncated: true };
 }
 
 function serializedBytes(value: unknown): number {

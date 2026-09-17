@@ -199,7 +199,12 @@ export interface TodoTask {
  */
 export interface ChatTodosSnapshot {
   tasks: TodoTask[];
-  nextId: number;
+  /**
+   * Next task id the extension reported. Optional and never rendered: it is kept
+   * only when the extension really reported a number, so a snapshot stays usable
+   * when the field is missing instead of being dropped for it.
+   */
+  nextId?: number;
   /** Entry timestamp of the tool result this snapshot was read from. */
   updatedAt: number;
   /**
