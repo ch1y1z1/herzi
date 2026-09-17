@@ -74,3 +74,13 @@
 - P4 `ask_user_question`：只展示 + 切 Terminal vs 也要一键回答。
 - P5 压缩进行中的实时提示：做 vs 不做。
 - P6 Worker 的 `todo` 表决口径：接受 vs 参与表决。
+
+### 清理记录
+
+- 2026-09-17：删除两个已集成且不再需要的 Worker worktree 与分支。
+  - `agent-20260917-tool-presentation`（w14，was `e53e3c6`）→ 内容已随 `d9ee427` 进入 main。
+  - `agent-20260917-worked-for-fix`（w15，was `371fa99`）→ 内容已随 `2ee16d5` + `b824bcf` 进入 main。
+  - 删除前核实：两分支相对 main **均无"仅存在于该分支的文件"**（0 个）；worktree 均 clean；两份任务记录均已在 main。
+  - 删除方式：先删各自 gitignored 的 `node_modules`/`dist`，再用 `herdr worktree remove`（`forced: false`），最后删分支。
+  - 仍保留：`agent-20260917-compaction-todo`（w16）—— **正在使用中**。
+- 待确认的其它残留资源：测试 pane `wW:p5`（agent `pi_cadence`，用于验证输出节奏规则）、`/tmp/pi-cadence-test`、`/tmp/memoh-ref`（参考克隆，约 65 MB）。
