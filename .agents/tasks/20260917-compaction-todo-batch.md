@@ -136,3 +136,32 @@
 **F1 的实现方向（Integrator 指定）**：让正文底部预留跟随 `.chat-footer` 实际高度（ResizeObserver → CSS 变量，176px 作为初始/回退值），并必须提供不依赖 ResizeObserver 的保守回退预留；回退路径需可被测试断言，真实遮挡像素标 NOT RUN。
 
 已向 `herzi_audit`（`w17:p1`）派发 F1+F2 修复，确认状态 `working`。
+
+## 真实浏览器测量方案（2026-09-17 确认）
+
+**为什么不需要先合入 main**：合并只决定"代码留在哪条分支"，不决定"能不能跑"。候选 worktree 自带完整工程，可以直接构建并运行。
+
+**为什么不能用 dev 模式**：dev 模式下 server 会把 `/` 302 到 Vite 5173，而 `vite.config.ts` 的 proxy **写死指向 3030**；本机 3030 已由开发者自己的服务占用 → API 会打到旧服务，测出来的界面是新代码、数据是旧后端，结论不可信。
+
+**采用方式（生产模式 + 隔离端口）**：
+
+```bash
+# 在候选 worktree 内
+npm run build
+HERZI_PORT=3041 npm start        # 生产模式：同一进程既服务 dist/web 又提供 API，无跨端口代理
+# browser-use 打开 http://127.0.0.1:3041/
+```
+
+**干跑验证（已完成，随后关闭）**：`GET /` → 200；`/api/health` → `{"ok":true,"herdrConnected":true}`；首页引用的是候选自己的 `assets/index-6yPltNIo.js` 与 `index-DCtbPlcS.css`。仅杀掉自己启动的 PID（88932），开发者的 3030 未受影响。
+
+**开发者对测量方式的决定**：
+
+| 决策 | 结果 |
+| --- | --- |
+| 是否做 before/after 对比 | **只测修复后**（不做修复前对照） |
+| 测试数据 | **只用本会话自己的 Pane**（`wW:p1`，有 167 次 `todo` 调用）；不打开其它 Pane、不发 prompt |
+| 浏览器层 | **browser-use 后台 CDP**：新开后台 tab、不抢焦点；测完关闭自己创建的 tab |
+
+**测量内容**：滚动到底后比较最后一条消息的 `getBoundingClientRect().bottom` 与 `.chat-footer` 的 `top`，得出被压住的像素数；至少覆盖两个窗口尺寸与 todo 条的折叠/展开两态。
+
+**边界与风险（如实记录）**：候选服务连接的是同一个本机 Herdr socket，因此会列出真实 workspace/pane 列表（只读、不做 mutation）；该测量是单来源证据（Integrator 本人），Reviewer 无法在无授权运行时下复测，只会核对代码路径与可测试性。
