@@ -787,6 +787,12 @@ export function ChatView({
                     placeholder="Chat via Herzi… 粘贴图片"
                     submitMode="enter"
                     rows={1}
+                    /* ChatView only mounts when the Chat view becomes visible
+                       (App renders Terminal/Chat conditionally), so this is
+                       what makes "switch to Chat" also focus the composer.
+                       assistant-ui skips the focus when the composer is
+                       disabled, so non-Pi panes are unaffected. */
+                    autoFocus
                   />
                   <ThreadPrimitive.If running={true}>
                     <ComposerPrimitive.Cancel

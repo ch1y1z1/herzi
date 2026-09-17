@@ -398,3 +398,30 @@ describe("ChatView prompt delivery visibility", () => {
     });
   });
 });
+
+describe("ChatView composer focus", () => {
+  it("focuses the composer as soon as the chat view is mounted", async () => {
+    render(<ChatView pane={pane} />);
+
+    const input = await screen.findByPlaceholderText(/Chat via Herzi/);
+    await waitFor(() => expect(document.activeElement).toBe(input));
+  });
+
+  it("keeps the composer focusable after the pane changes", async () => {
+    const { unmount } = render(<ChatView pane={pane} />);
+    await waitFor(() =>
+      expect(document.activeElement).toBe(
+        screen.getByPlaceholderText(/Chat via Herzi/),
+      ),
+    );
+
+    unmount();
+    // App renders `<ChatView key={pane.id}>`, so a pane switch remounts it.
+    render(<ChatView pane={{ ...pane, id: "pane-2" }} />);
+    await waitFor(() =>
+      expect(document.activeElement).toBe(
+        screen.getByPlaceholderText(/Chat via Herzi/),
+      ),
+    );
+  });
+});
