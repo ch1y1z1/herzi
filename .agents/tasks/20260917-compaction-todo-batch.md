@@ -95,3 +95,20 @@
 - 已清理 w16：删除 gitignored `node_modules`/`dist` 后用 `herdr worktree remove`（`forced: false`）移除 worktree，再删除分支（was `9af9eac`）。
 - 现仅剩在用的 `agent-20260917-compaction-fix`（w17）。
 - 推送：把撤回、规则与全部记录推到 `origin/main`。
+
+## 修复与独立复审（2026-09-17）
+
+**修复 Worker**：`herzi_audit`（`w17:p1`，分支 `agent-20260917-compaction-fix`，base `9af9eac`）
+- 交付：`71fe33c`（修复 + 测试）、`6212c4b`（自查记录）。
+- 改动范围：`ChatView.tsx`、`ChatView.test.tsx`、`pi-session-reader.test.ts`、任务记录 —— 未越界。
+- 修复内容：`combineAssistantTurn` 改为**按段、在段内第一个被折叠 part 处插入组**（不再循环结束后插入），并让分界成为真正的段边界；turn 状态/完成时间改取最后一条真实消息。
+- 修复者自述证据：新顺序断言在 `9af9eac` 上失败、在 `dc8282c` 上通过、在本分支通过（证明是回归而非迁就测试）；无分界 11 个形状与 `dc8282c` 逐字段一致；`npm test` 157 tests PASS、typecheck/build PASS。
+- 修复者声明的 4 处未修限制：分界借用相邻 `createdAt` 作排序锚点可能在极端情况挤掉未落盘的实时消息（既有弱点）；todo 快照超限整条不显示；running turn 以分界 part 结尾时上方 live reasoning 会短暂显示 Thinking；每段共用整轮时长、`at: 0` 同 kind 共享展开状态。
+
+**Integrator 生成的评审候选**（**未合入 main**）：
+- `review-20260917-compaction-fix`（`w18`），base = main `25a72ab`，`git merge --no-ff agent-20260917-compaction-fix` → `b201c43`（无冲突；候选 `src/` 与 fix 分支一致）；评审任务定义 `ce16cd5`。
+- 候选态验证（Integrator 实测）：`npm ci` PASS、`npm run typecheck` PASS、`npm test` PASS（15 files / **157 tests**）、`npm run build` PASS。
+
+**独立 Reviewer**：`herzi_reviewer2`（`w18:p1`）—— 与实现者、修复者均非同一 Agent；只读产品代码、只写 review 记录；已发送复审 prompt 并确认 `working`。
+
+**下一步**：Reviewer 完成后由开发者通知 Integrator → 汇报 findings 与处置建议 → **由开发者决定是否批准合入 main**（未获批准不得合入）。
