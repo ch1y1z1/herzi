@@ -253,6 +253,345 @@ describe("PiSessionReader reasoning durations", () => {
   });
 });
 
+describe("PiSessionReader compaction dividers", () => {
+  it("places the compaction divider before the first kept entry (semantic boundary)", async () => {
+    const sessionPath = await writeSession([
+      messageEntry("m1", null, "user", "first", "2026-09-15T00:00:00.000Z"),
+      messageEntry("m2", "m1", "assistant", "first answer", "2026-09-15T00:00:10.000Z"),
+      messageEntry("m3", "m2", "user", "kept question", "2026-09-15T00:01:00.000Z"),
+      messageEntry("m4", "m3", "assistant", "kept answer", "2026-09-15T00:01:10.000Z"),
+      {
+        type: "compaction",
+        id: "c1",
+        parentId: "m4",
+        timestamp: "2026-09-15T00:02:00.000Z",
+        summary: "## 摘要\n\n早前的工作被压缩。",
+        firstKeptEntryId: "m3",
+        tokensBefore: 111_867,
+        fromHook: false,
+        details: { modifiedFiles: ["src/a.ts", "src/b.ts"], readFiles: ["src/c.ts"] },
+        usage: { input: 1, output: 2 },
+      },
+      messageEntry("m5", "c1", "assistant", "after compaction", "2026-09-15T00:03:00.000Z"),
+    ]);
+
+    const snapshot = await new PiSessionReader().read("pane-1", sessionPath, false);
+
+    // Historical messages are never hidden; the divider only marks where the
+    // model's context now starts.
+    expect(snapshot.messages.map((message) => message.id)).toEqual([
+      "m1",
+      "m2",
+      "divider:c1",
+      "m3",
+      "m4",
+      "m5",
+    ]);
+    expect(snapshot.messages[2]?.content).toEqual([
+      {
+        type: "divider",
+        kind: "compaction",
+        summary: "## 摘要\n\n早前的工作被压缩。",
+        tokensBefore: 111_867,
+        modifiedFiles: ["src/a.ts", "src/b.ts"],
+        readFiles: ["src/c.ts"],
+        at: Date.parse("2026-09-15T00:02:00.000Z"),
+      },
+    ]);
+    // The divider is a position marker: its message keeps the timestamp of the
+    // message it precedes, because the client re-sorts messages by `createdAt`
+    // and would otherwise move the marker below the kept history. The real
+    // compaction time stays on the part as `at`.
+    const divider = snapshot.messages[2]!;
+    expect(divider.createdAt).toBe(snapshot.messages[3]!.createdAt);
+    expect(divider.createdAt).not.toBe(Date.parse("2026-09-15T00:02:00.000Z"));
+  });
+
+  it("falls back to the compaction entry position when firstKeptEntryId is missing", async () => {
+    const sessionPath = await writeSession([
+      messageEntry("m1", null, "user", "a", "2026-09-15T00:00:00.000Z"),
+      messageEntry("m2", "m1", "assistant", "b", "2026-09-15T00:00:10.000Z"),
+      {
+        type: "compaction",
+        id: "c1",
+        parentId: "m2",
+        timestamp: "2026-09-15T00:02:00.000Z",
+        summary: "no kept id",
+      },
+      messageEntry("m3", "c1", "assistant", "c", "2026-09-15T00:03:00.000Z"),
+    ]);
+
+    const snapshot = await new PiSessionReader().read("pane-1", sessionPath, false);
+
+    expect(snapshot.messages.map((message) => message.id)).toEqual([
+      "m1",
+      "m2",
+      "divider:c1",
+      "m3",
+    ]);
+    // Missing numeric fields are omitted instead of guessed.
+    expect(snapshot.messages[2]?.content[0]).toEqual({
+      type: "divider",
+      kind: "compaction",
+      summary: "no kept id",
+      at: Date.parse("2026-09-15T00:02:00.000Z"),
+    });
+  });
+
+  it("falls back to the compaction entry position when firstKeptEntryId is off the branch", async () => {
+    const sessionPath = await writeSession([
+      messageEntry("m1", null, "user", "a", "2026-09-15T00:00:00.000Z"),
+      {
+        type: "compaction",
+        id: "c1",
+        parentId: "m1",
+        timestamp: "2026-09-15T00:02:00.000Z",
+        summary: "kept id lives elsewhere",
+        firstKeptEntryId: "other-branch-entry",
+        tokensBefore: 396_805,
+      },
+      messageEntry("m2", "c1", "assistant", "b", "2026-09-15T00:03:00.000Z"),
+    ]);
+
+    const snapshot = await new PiSessionReader().read("pane-1", sessionPath, false);
+
+    expect(snapshot.messages.map((message) => message.id)).toEqual([
+      "m1",
+      "divider:c1",
+      "m2",
+    ]);
+  });
+
+  it("keeps several compaction dividers and marks branch summaries", async () => {
+    const sessionPath = await writeSession([
+      messageEntry("m1", null, "user", "a", "2026-09-15T00:00:00.000Z"),
+      messageEntry("m2", "m1", "assistant", "b", "2026-09-15T00:00:10.000Z"),
+      messageEntry("m3", "m2", "assistant", "c", "2026-09-15T00:00:20.000Z"),
+      {
+        type: "compaction",
+        id: "c1",
+        parentId: "m3",
+        timestamp: "2026-09-15T00:02:00.000Z",
+        summary: "first compaction",
+        firstKeptEntryId: "m3",
+        tokensBefore: 100,
+      },
+      messageEntry("m4", "c1", "assistant", "d", "2026-09-15T00:03:00.000Z"),
+      {
+        type: "branch_summary",
+        id: "b1",
+        parentId: "m4",
+        timestamp: "2026-09-15T00:03:30.000Z",
+        summary: "summary of the abandoned branch",
+        fromId: "m2",
+      },
+      messageEntry("m5", "b1", "assistant", "e", "2026-09-15T00:04:00.000Z"),
+      {
+        type: "compaction",
+        id: "c2",
+        parentId: "m5",
+        timestamp: "2026-09-15T00:05:00.000Z",
+        summary: "second compaction",
+        firstKeptEntryId: "m5",
+        tokensBefore: 200,
+      },
+      messageEntry("m6", "c2", "assistant", "f", "2026-09-15T00:06:00.000Z"),
+    ]);
+
+    const snapshot = await new PiSessionReader().read("pane-1", sessionPath, false);
+
+    expect(snapshot.messages.map((message) => message.id)).toEqual([
+      "m1",
+      "m2",
+      "divider:c1",
+      "m3",
+      "m4",
+      "divider:b1",
+      "divider:c2",
+      "m5",
+      "m6",
+    ]);
+    const dividers = snapshot.messages.flatMap((message) =>
+      message.content.flatMap((part) => (part.type === "divider" ? [part] : [])),
+    );
+    expect(dividers.map((divider) => divider.kind)).toEqual([
+      "compaction",
+      "branch-summary",
+      "compaction",
+    ]);
+    expect(dividers.map((divider) => divider.summary)).toEqual([
+      "first compaction",
+      "summary of the abandoned branch",
+      "second compaction",
+    ]);
+    // `branch_summary` has no `tokensBefore`; nothing is invented for it.
+    expect(dividers[1]).not.toHaveProperty("tokensBefore");
+  });
+
+  it("keeps the divider with at 0 when the entry timestamp is unusable", async () => {
+    const sessionPath = await writeSession([
+      messageEntry("m1", null, "user", "a", timestampMs(0)),
+      { type: "compaction", id: "c1", parentId: "m1", summary: "no timestamp" },
+      messageEntry("m2", "c1", "assistant", "b", timestampMs(10_000)),
+    ]);
+
+    const snapshot = await new PiSessionReader().read("pane-1", sessionPath, false);
+
+    expect(snapshot.messages.map((message) => message.id)).toEqual([
+      "m1",
+      "divider:c1",
+      "m2",
+    ]);
+    expect(snapshot.messages[1]?.content[0]).toMatchObject({
+      type: "divider",
+      at: 0,
+    });
+  });
+});
+
+describe("PiSessionReader todo snapshots", () => {
+  it("keeps the last todo result as a projected snapshot", async () => {
+    const sessionPath = await writeSession([
+      todoEntry("t1", null, "2026-09-15T00:00:00.000Z", {
+        action: "create",
+        nextId: 2,
+        tasks: [{ id: 1, subject: "第一个任务", status: "in_progress", activeForm: "正在做第一个" }],
+      }),
+      todoEntry("t2", "t1", "2026-09-15T00:00:30.000Z", {
+        action: "update",
+        nextId: 4,
+        tasks: [
+          {
+            id: 1,
+            subject: "第一个任务",
+            status: "completed",
+            activeForm: "正在做第一个",
+            description: "细节",
+            owner: "unverified-field",
+            metadata: { nested: true },
+          },
+          { id: 2, subject: "第二个任务", status: "pending", blockedBy: [1] },
+          { id: 3, subject: "已删除", status: "deleted" },
+        ],
+      }),
+      messageEntry("m1", "t2", "assistant", "done", "2026-09-15T00:01:00.000Z"),
+    ]);
+
+    const snapshot = await new PiSessionReader().read("pane-1", sessionPath, false);
+
+    // Only `create`/`update` results exist here: no `list` call is needed
+    // because every successful call returns the full snapshot.
+    expect(snapshot.todos).toEqual({
+      nextId: 4,
+      updatedAt: Date.parse("2026-09-15T00:00:30.000Z"),
+      tasks: [
+        {
+          id: 1,
+          subject: "第一个任务",
+          status: "completed",
+          activeForm: "正在做第一个",
+          description: "细节",
+        },
+        { id: 2, subject: "第二个任务", status: "pending", blockedBy: [1] },
+        { id: 3, subject: "已删除", status: "deleted" },
+      ],
+    });
+    // Unverified task fields are dropped, never re-serialized.
+    const first = snapshot.todos?.tasks[0];
+    expect(first && Object.keys(first).sort()).toEqual([
+      "activeForm",
+      "description",
+      "id",
+      "status",
+      "subject",
+    ]);
+  });
+
+  it("takes the last matching result and skips malformed ones", async () => {
+    const sessionPath = await writeSession([
+      todoEntry("t1", null, "2026-09-15T00:00:00.000Z", {
+        action: "create",
+        nextId: 1,
+        tasks: [{ id: 1, subject: "first", status: "pending" }],
+      }),
+      todoEntry("t2", "t1", "2026-09-15T00:00:10.000Z", { action: "list", tasks: "nope", nextId: 1 }),
+      toolResultEntry("t3", "t2", "2026-09-15T00:00:20.000Z", "todo", undefined),
+      todoEntry("t4", "t3", "2026-09-15T00:00:30.000Z", {
+        action: "update",
+        nextId: 9,
+        tasks: [{ id: 5, subject: "last", status: "pending" }],
+      }),
+      toolResultEntry("t5", "t4", "2026-09-15T00:00:40.000Z", "bash", {
+        tasks: [],
+        nextId: 1,
+      }),
+    ]);
+
+    const snapshot = await new PiSessionReader().read("pane-1", sessionPath, false);
+
+    expect(snapshot.todos?.nextId).toBe(9);
+    expect(snapshot.todos?.tasks).toEqual([
+      { id: 5, subject: "last", status: "pending" },
+    ]);
+    expect(snapshot.todos?.truncated).toBeUndefined();
+  });
+
+  it("drops malformed task entries instead of inventing a task", async () => {
+    const sessionPath = await writeSession([
+      todoEntry("t1", null, "2026-09-15T00:00:00.000Z", {
+        action: "update",
+        nextId: 3,
+        tasks: [
+          "not a task",
+          { id: 1, status: "pending" },
+          { id: "2", subject: "string id", status: "pending" },
+          { id: 2, subject: "real", status: 7 },
+          { id: 3, subject: "ok", status: "pending", blockedBy: [1, "x"] },
+        ],
+      }),
+    ]);
+
+    const snapshot = await new PiSessionReader().read("pane-1", sessionPath, false);
+
+    expect(snapshot.todos?.tasks).toEqual([
+      { id: 3, subject: "ok", status: "pending", blockedBy: [1] },
+    ]);
+  });
+
+  it("has no todo snapshot when the tool was never used", async () => {
+    const sessionPath = await writeSession([
+      messageEntry("m1", null, "assistant", "no todos here", "2026-09-15T00:00:00.000Z"),
+    ]);
+
+    const snapshot = await new PiSessionReader().read("pane-1", sessionPath, false);
+    expect(snapshot.todos).toBeUndefined();
+  });
+
+  it("degrades to counts only when the snapshot exceeds its size budget", async () => {
+    const sessionPath = await writeSession([
+      todoEntry("t1", null, "2026-09-15T00:00:00.000Z", {
+        action: "list",
+        nextId: 4001,
+        tasks: Array.from({ length: 4_000 }, (_, index) => ({
+          id: index + 1,
+          subject: `任务 ${index + 1}`,
+          status: "pending",
+          description: "描述".repeat(60),
+        })),
+      }),
+    ]);
+
+    const snapshot = await new PiSessionReader().read("pane-1", sessionPath, false);
+
+    expect(snapshot.todos).toEqual({
+      nextId: 4001,
+      updatedAt: Date.parse("2026-09-15T00:00:00.000Z"),
+      tasks: [],
+      truncated: true,
+    });
+  });
+});
+
 async function writeSession(entries: unknown[]): Promise<string> {
   const root = await mkdtemp(path.join(process.cwd(), ".tmp-herzi-session-test-"));
   testRoots.push(root);
@@ -305,6 +644,59 @@ function assistantEntry(
       ],
     },
   };
+}
+
+function messageEntry(
+  id: string,
+  parentId: string | null,
+  role: "user" | "assistant",
+  text: string,
+  timestamp: string | number,
+) {
+  const at = typeof timestamp === "number" ? timestamp : Date.parse(timestamp);
+  return {
+    type: "message",
+    id,
+    parentId,
+    timestamp: new Date(at).toISOString(),
+    message: { role, timestamp: at, content: text, stopReason: "stop" },
+  };
+}
+
+function timestampMs(at: number): string {
+  return new Date(at).toISOString();
+}
+
+function toolResultEntry(
+  id: string,
+  parentId: string | null,
+  timestamp: string,
+  toolName: string,
+  details: unknown,
+) {
+  return {
+    type: "message",
+    id,
+    parentId,
+    timestamp,
+    message: {
+      role: "toolResult",
+      toolCallId: `call-${id}`,
+      toolName,
+      isError: false,
+      content: "ok",
+      ...(details === undefined ? {} : { details }),
+    },
+  };
+}
+
+function todoEntry(
+  id: string,
+  parentId: string | null,
+  timestamp: string,
+  details: Record<string, unknown>,
+) {
+  return toolResultEntry(id, parentId, timestamp, "todo", details);
 }
 
 function pngBytes(): Buffer {

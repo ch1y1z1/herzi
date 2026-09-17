@@ -477,7 +477,26 @@ function toolPart(
   };
 }
 
-function stubChat(messages: ChatMessage[], running: boolean): void {
+function dividerPart(input: {
+  kind?: "compaction" | "branch-summary";
+  summary: string;
+  tokensBefore?: number;
+  modifiedFiles?: string[];
+  readFiles?: string[];
+  at?: number;
+}): ChatPart {
+  return {
+    type: "divider",
+    kind: input.kind ?? "compaction",
+    summary: input.summary,
+    ...(input.tokensBefore === undefined ? {} : { tokensBefore: input.tokensBefore }),
+    ...(input.modifiedFiles ? { modifiedFiles: input.modifiedFiles } : {}),
+    ...(input.readFiles ? { readFiles: input.readFiles } : {}),
+    at: input.at ?? TURN_STARTED_AT,
+  };
+}
+
+function stubChat(messages: ChatMessage[], running: boolean, todos?: unknown): void {
   vi.stubGlobal(
     "fetch",
     vi.fn(async () =>
@@ -486,6 +505,7 @@ function stubChat(messages: ChatMessage[], running: boolean): void {
         running,
         updatedAt: Date.now(),
         messages,
+        ...(todos === undefined ? {} : { todos }),
       }),
     ),
   );
@@ -947,5 +967,364 @@ describe("ChatView activity presentation", () => {
     // turn subtree (which is what made the UI flicker and collapse groups).
     expect(messageIds()).toEqual(before);
     expect(document.querySelector('[data-message-id^="turn:"]')).toBe(turnNode);
+  });
+});
+
+describe("ChatView compaction dividers", () => {
+  beforeEach(() => {
+    resetPanelOpenStores();
+    stubChat([], false);
+  });
+
+  afterEach(() => {
+    resetPanelOpenStores();
+  });
+
+  it("breaks a turn into two Worked for groups around a compaction divider", async () => {
+    // 8986 characters, the size seen in real sessions (6.8k-9k).
+    const summary = "摘要".repeat(4_493);
+    const dividerMessage: ChatMessage = {
+      // The reader emits the divider as its own assistant message, anchored to
+      // the timestamp of the message it precedes.
+      id: "divider:c1",
+      role: "assistant",
+      createdAt: TURN_STARTED_AT,
+      content: [dividerPart({ summary, tokensBefore: 111_867 })],
+    };
+    stubChat(
+      [
+        userMessage(),
+        assistantMessage("a1", [
+          { type: "reasoning", text: "先看代码", durationMs: 12_000 },
+          { type: "text", text: "看完了" },
+        ]),
+        dividerMessage,
+        assistantMessage("a2", [
+          { type: "reasoning", text: "继续做", durationMs: 8_000 },
+          { type: "text", text: "done" },
+        ]),
+      ],
+      false,
+    );
+
+    render(<ChatView pane={pane} />);
+    await screen.findByText("done");
+
+    await waitFor(() => expect(document.querySelectorAll(".work-group")).toHaveLength(2));
+    const renderedOrder = Array.from(
+      document.querySelectorAll(".work-group, .chat-divider"),
+    ).map((element) =>
+      element.classList.contains("chat-divider") ? "divider" : "group",
+    );
+    expect(renderedOrder).toEqual(["group", "divider", "group"]);
+    for (const group of document.querySelectorAll(".work-group")) {
+      expect(cell(group as HTMLElement, ".activity-verb")).toMatch(/^Worked for /);
+    }
+    // The divider is a boundary, not a work row: it never lands inside a group,
+    // and the work rows really are split by it.
+    expect(document.querySelector(".work-group .chat-divider")).toBeNull();
+    const groups = Array.from(document.querySelectorAll(".work-group"));
+    expect(groups[0]?.textContent).toContain("先看代码");
+    expect(groups[0]?.textContent).not.toContain("继续做");
+    expect(groups[1]?.textContent).toContain("继续做");
+    expect(groups[1]?.textContent).not.toContain("先看代码");
+
+    const divider = document.querySelector(".chat-divider") as HTMLDetailsElement;
+    expect(cell(divider, ".divider-label")).toBe(
+      "上下文已压缩 · 压缩前 111,867 tokens · 摘要 8.9k 字",
+    );
+    // The summary and the file lists stay folded: a real summary is 7-9k chars.
+    expect(divider.open).toBe(false);
+    expect(divider.querySelector(".divider-detail")).toBeTruthy();
+  });
+
+  it("renders no divider and a single group when nothing was compacted", async () => {
+    stubChat(
+      [
+        userMessage(),
+        assistantMessage("a1", [
+          { type: "reasoning", text: "先看代码", durationMs: 12_000 },
+          { type: "text", text: "看完了" },
+        ]),
+      ],
+      false,
+    );
+
+    render(<ChatView pane={pane} />);
+    await screen.findByText("看完了");
+
+    await waitFor(() => expect(document.querySelectorAll(".work-group")).toHaveLength(1));
+    expect(document.querySelector(".chat-divider")).toBeNull();
+  });
+
+  it("shows the summary and the file counts once the divider is expanded", async () => {
+    stubChat(
+      [
+        userMessage(),
+        assistantMessage("a1", [
+          { type: "reasoning", text: "先看代码", durationMs: 12_000 },
+          { type: "text", text: "看完了" },
+        ]),
+        {
+          id: "divider:c1",
+          role: "assistant",
+          createdAt: TURN_STARTED_AT,
+          content: [
+            dividerPart({
+              summary: "早前的工作被压缩。",
+              tokensBefore: 396_805,
+              modifiedFiles: ["src/a.ts", "src/b.ts"],
+              readFiles: ["src/c.ts"],
+              at: TURN_STARTED_AT + 60_000,
+            }),
+          ],
+        },
+        assistantMessage("a2", [{ type: "text", text: "done" }]),
+      ],
+      false,
+    );
+
+    render(<ChatView pane={pane} />);
+    await screen.findByText("done");
+
+    const divider = await waitFor(() => {
+      const element = document.querySelector(".chat-divider");
+      if (!element) throw new Error("the compaction divider was not rendered");
+      return element as HTMLDetailsElement;
+    });
+    expect(divider.open).toBe(false);
+    // jsdom never toggles <details> itself, so drive the handler the browser fires.
+    divider.open = true;
+    fireEvent(divider, new Event("toggle"));
+
+    expect(screen.getByText(/早前的工作被压缩/)).toBeTruthy();
+    expect(cell(divider, ".divider-files")).toContain("涉及文件 2");
+    expect(cell(divider, ".divider-files")).toContain("src/a.ts");
+    expect(cell(divider, ".divider-files")).toContain("已读文件 1");
+    expect(cell(divider, ".divider-files")).toContain("src/c.ts");
+    // The real compaction time is kept, even though the marker sits earlier.
+    expect(cell(divider, ".divider-time")).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/);
+  });
+
+  it("keeps the expanded divider across the 1.5s poll refresh", async () => {
+    const messages: ChatMessage[] = [
+      userMessage(),
+      assistantMessage("a1", [{ type: "text", text: "before" }]),
+      {
+        id: "divider:c1",
+        role: "assistant",
+        createdAt: TURN_STARTED_AT,
+        content: [dividerPart({ summary: "摘要内容", at: TURN_STARTED_AT + 1_000 })],
+      },
+      assistantMessage("a2", [{ type: "text", text: "after" }]),
+    ];
+    stubChat(messages, false);
+
+    const { rerender } = render(<ChatView pane={pane} realtime={realtimeTick(1)} />);
+    await screen.findByText("after");
+    const divider = document.querySelector(".chat-divider") as HTMLDetailsElement;
+    divider.open = true;
+    fireEvent(divider, new Event("toggle"));
+    expect(divider.open).toBe(true);
+
+    // A new poll returns new message objects; the expansion state lives outside
+    // React and is keyed by the divider's own timestamp.
+    stubChat(messages, false);
+    rerender(<ChatView pane={pane} realtime={realtimeTick(2)} />);
+    await waitFor(() =>
+      expect((document.querySelector(".chat-divider") as HTMLDetailsElement).open).toBe(
+        true,
+      ),
+    );
+  });
+
+  it("renders a trailing divider without inventing an extra group", async () => {
+    stubChat(
+      [
+        userMessage(),
+        assistantMessage("a1", [{ type: "text", text: "done" }]),
+        {
+          id: "divider:c9",
+          role: "assistant",
+          createdAt: TURN_STARTED_AT,
+          content: [dividerPart({ summary: "末尾压缩", at: 0 })],
+        },
+      ],
+      false,
+    );
+
+    render(<ChatView pane={pane} />);
+    await screen.findByText("done");
+
+    await waitFor(() => expect(document.querySelectorAll(".worked-row")).toHaveLength(1));
+    // The text-only turn keeps its `Worked for` row (rendered inline because it
+    // has no work rows) and the trailing marker comes after it.
+    expect(screen.getByText(/Worked for /)).toBeTruthy();
+    const renderedOrder = Array.from(
+      document.querySelectorAll(".work-group, .worked-row, .chat-divider"),
+    ).map((element) =>
+      element.classList.contains("chat-divider") ? "divider" : "group",
+    );
+    expect(renderedOrder).toEqual(["group", "divider"]);
+  });
+
+  it("labels a branch summary as such and never invents token numbers", async () => {
+    stubChat(
+      [
+        userMessage(),
+        assistantMessage("a1", [{ type: "text", text: "before" }]),
+        {
+          id: "divider:b1",
+          role: "assistant",
+          createdAt: TURN_STARTED_AT,
+          content: [
+            dividerPart({
+              kind: "branch-summary",
+              summary: "分支摘要内容",
+              at: TURN_STARTED_AT + 30_000,
+            }),
+          ],
+        },
+        assistantMessage("a2", [{ type: "text", text: "after" }]),
+      ],
+      false,
+    );
+
+    render(<ChatView pane={pane} />);
+    await screen.findByText("after");
+
+    const divider = document.querySelector(".chat-divider") as HTMLElement;
+    expect(cell(divider, ".divider-label")).toBe("分支摘要 · 摘要 6 字");
+    expect(cell(divider, ".divider-label")).not.toContain("压缩前");
+  });
+
+  it("renders a bare marker when the transcript carries no summary or files", async () => {
+    stubChat(
+      [
+        userMessage(),
+        assistantMessage("a1", [{ type: "text", text: "before" }]),
+        {
+          id: "divider:c2",
+          role: "assistant",
+          createdAt: TURN_STARTED_AT,
+          content: [dividerPart({ summary: "", at: 0 })],
+        },
+        assistantMessage("a2", [{ type: "text", text: "after" }]),
+      ],
+      false,
+    );
+
+    render(<ChatView pane={pane} />);
+    await screen.findByText("after");
+
+    const divider = document.querySelector(".chat-divider") as HTMLElement;
+    expect(divider.tagName).toBe("DIV");
+    // No timestamp either: only what the transcript actually provided.
+    expect(cell(divider, ".divider-label")).toBe("上下文已压缩");
+    expect(cell(divider, ".divider-time")).toBeNull();
+  });
+});
+
+describe("ChatView todo bar", () => {
+  beforeEach(() => {
+    resetPanelOpenStores();
+    stubChat([], false);
+  });
+
+  afterEach(() => {
+    resetPanelOpenStores();
+  });
+
+  const todos = {
+    nextId: 6,
+    updatedAt: TURN_STARTED_AT,
+    tasks: [
+      { id: 1, subject: "第一个任务", status: "in_progress", activeForm: "正在写测试" },
+      { id: 2, subject: "第二个任务", status: "pending", blockedBy: [1] },
+      { id: 3, subject: "第三个任务", status: "pending", blockedBy: [5] },
+      { id: 4, subject: "已经完成的任务", status: "completed" },
+      { id: 5, subject: "被删除的任务", status: "deleted" },
+    ],
+  };
+
+  it("shows non-zero counts above the composer and groups the tasks when expanded", async () => {
+    stubChat([userMessage(), assistantMessage("a1", [{ type: "text", text: "hi" }])], false, todos);
+
+    const { rerender } = render(<ChatView pane={pane} />);
+    await screen.findByText("hi");
+
+    const bar = await waitFor(() => {
+      const element = document.querySelector(".chat-todo-bar");
+      if (!element) throw new Error("the todo bar was not rendered");
+      return element as HTMLDetailsElement;
+    });
+    expect(bar.open).toBe(false);
+    expect(cell(bar, ".todo-counts")).toBe("待办 2 · 进行中 1 · 完成 1");
+
+    const composer = document.querySelector(".chat-composer") as HTMLElement;
+    expect(
+      bar.compareDocumentPosition(composer) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+
+    bar.open = true;
+    fireEvent(bar, new Event("toggle"));
+
+    // in_progress comes first and prefers activeForm; pending shows the subject.
+    expect(document.querySelector(".todo-group")?.classList.contains("in_progress")).toBe(
+      true,
+    );
+    expect(screen.getByText("正在写测试")).toBeTruthy();
+    expect(screen.queryByText("第一个任务")).toBeNull();
+    expect(screen.getByText("第二个任务")).toBeTruthy();
+    expect(screen.getByText("已经完成的任务")).toBeTruthy();
+    // Tombstones never show up, even expanded.
+    expect(screen.queryByText("被删除的任务")).toBeNull();
+    expect(bar.textContent).not.toContain("被删除的任务");
+    // A dependency that is still open is reported as a blocker; a dependency
+    // that only exists as a tombstone cannot block anything.
+    expect(screen.getByText(/被阻塞：依赖 #1（未完成）/)).toBeTruthy();
+    expect(screen.getByText(/依赖 #5（未知）/)).toBeTruthy();
+
+    // The bar keeps its expansion state across the 1.5s poll refresh.
+    stubChat(
+      [userMessage(), assistantMessage("a1", [{ type: "text", text: "hi" }])],
+      false,
+      todos,
+    );
+    rerender(<ChatView pane={pane} realtime={realtimeTick(1)} />);
+    await waitFor(() =>
+      expect((document.querySelector(".chat-todo-bar") as HTMLDetailsElement).open).toBe(
+        true,
+      ),
+    );
+    expect(screen.getByText("正在写测试")).toBeTruthy();
+  });
+
+  it("renders nothing without a todo snapshot or with an empty one", async () => {
+    stubChat([userMessage(), assistantMessage("a1", [{ type: "text", text: "hi" }])], false);
+    const { rerender } = render(<ChatView pane={pane} />);
+    await screen.findByText("hi");
+    expect(document.querySelector(".chat-todo-bar")).toBeNull();
+
+    stubChat(
+      [userMessage(), assistantMessage("a1", [{ type: "text", text: "hi" }])],
+      false,
+      { nextId: 1, updatedAt: 0, tasks: [] },
+    );
+    rerender(<ChatView pane={pane} realtime={realtimeTick(1)} />);
+    await waitFor(() => expect(document.querySelector(".chat-todo-bar")).toBeNull());
+  });
+
+  it("renders nothing for a degraded snapshot that only kept its nextId", async () => {
+    stubChat(
+      [userMessage(), assistantMessage("a1", [{ type: "text", text: "hi" }])],
+      false,
+      { nextId: 4001, updatedAt: TURN_STARTED_AT, tasks: [], truncated: true },
+    );
+
+    render(<ChatView pane={pane} />);
+    await screen.findByText("hi");
+
+    expect(document.querySelector(".chat-todo-bar")).toBeNull();
   });
 });
