@@ -181,3 +181,28 @@ HERZI_PORT=3041 npm start        # 生产模式：同一进程既服务 dist/web
 - `browser-use` 连接失败：`DevToolsActivePort not found ... enable chrome://inspect/#remote-debugging, or set BU_CDP_WS`。`browser-use --doctor` 显示 `[ok] chrome running` 但 `[FAIL] daemon alive / active browser connections`。
 - 按官方流程尝试「原命令挂起 + 另开 `mac-approve`」失败：`mac-approve` 返回 `not-found: retry the browser command and run browser-harness mac-approve when the prompt appears`；随后我按确切 PID 清理了自己启动的 `browser-use` 与其 daemon，未留残留进程。
 - 结论：需要开发者在本机 Chrome 侧开启远程调试（或由我另起一个隔离 profile 的调试 Chrome），否则 F1 的真实遮挡只能停留在**静态 CSS 推断**。
+
+## F1 真实浏览器测量（2026-09-17，已完成）
+
+**前置**：开发者在自己 Chrome 里开启远程调试（Chrome 监听 `127.0.0.1:9222`，`DevToolsActivePort` 于 21:30 刷新）。此前一次失败的原因是 **Chrome 当时根本没在运行**，且 19:23 那份 `DevToolsActivePort` 是过期文件（无人监听 9222）。
+
+**被测对象**：候选 `review-20260917-compaction-fix`（`w18`，含 F1/F2 修复）构建后的生产服务，跑在 **3041**（`HERZI_PORT=3041 npm start`）；数据使用**本会话自己的 Pane**（todo 条显示「完成 56」，116 条消息）；仅使用 browser-use 后台 CDP，未打开其它 Pane、未发送任何 prompt。
+
+**测量方法**：滚到会话底部后，比较 `.chat-footer` 的 `top` 与最后内容（`.chat-message` / `.agent-working`）的 `bottom`，得到被浮层压住的像素数；同时读 `padding-bottom`（即 `--chat-footer-inset`）与 footer 实际高度。
+
+| 状态 | footer 高度 | 底部预留 | 遮挡（最后消息 / working 行） |
+| --- | ---: | ---: | --- |
+| 默认窗口 · todo 条折叠 | 117px | **176px** | 0 / 0 |
+| 默认窗口 · todo 条展开 | **377px** | **393px** | 0 / 0 |
+| 模拟 1100×700 · 展开 | 377px | 393px | 0 / 0 |
+| 模拟 1100×700 · 再折叠 | 117px | **176px** | 0 / 0 |
+
+**结论**：
+
+1. 修复生效——底部预留**跟随 footer 实际占用**（展开 393px / 折叠 176px），滚到底后**不遮挡任何内容**；折叠后预留回落到 176px，**没有留下永久空隙**。
+2. 对照旧实现（写死 176px）：footer 展开时高度 377px，而内容末端会停在「视口底 − 176px」，比 footer 顶边低约 **216px** → 即修复前约 **216px 正文尾部被永久压住且滚不出来**，与独立 Reviewer 的静态推断方向一致（它当时只能给方向，无法给数值）。
+3. F1 此前只能静态推断，现已有真实测量证据。
+
+**清理**：测量后清理了自己启动的全部资源——3041 候选服务（pid 9567）、browser-use daemon（pid 72570，21:31 启动）、`/tmp/candidate-3041.*`、`/tmp/bu-*.log`、`/tmp/rv-ci.log`；清除了 CDP 的 viewport override。开发者的 Chrome 未关闭、未改动。
+
+**未确认项**：我用 `close_tab()` 关闭了自己创建的那个 Herzi tab，随后 harness 报 `cdp_disconnected`（与该 tab 被关闭一致），但本机 Chrome 152 的 `/json/*` HTTP 端点对 curl 不响应，因此**无法从命令行二次确认该 tab 是否已关闭**；若开发者看到残留 tab，可自行关闭。
