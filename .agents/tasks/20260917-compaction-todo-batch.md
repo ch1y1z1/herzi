@@ -220,3 +220,16 @@ HERZI_PORT=3041 npm start        # 生产模式：同一进程既服务 dist/web
 4. 其余 P3 遗留（F3–F9、F-C，以及已排队的 F11 CSS / flaky 定时器 / N1）**合并为一轮**处理，其中 F3 需开发者先定"文档口径 or 改代码"。
 
 **执行记录**：已向 `herzi_audit`（`w17:p1`）派发该小补丁；第一次派发因模型提供方容量限制中断（`deepseek ... at capacity`），工作区未产生改动（HEAD 仍为 `8fe5b3f`）；重试后确认 `working`。
+
+## 小补丁与第三轮聚焦复审（2026-09-17）
+
+**补丁交付**：`herzi_audit`（`w17`）→ `0795d9f`（修复）+ `ef8d890`（记录），只动 `ChatView.tsx`、`ChatView.test.tsx`、任务记录：
+- F-D：`useChatFooterInset` 的 effect 由 `useEffect` 改为 `useLayoutEffect`（附注说明重挂载时 todo 展开状态由 `panelOpenState` 跨挂载保留，被动 effect 会让首帧沿用 176px 回退）；
+- F-A：新增 `watches the pane's bottom edge with the same observer as the footer`，把断言绑在"观察 footer 的 observer"上；
+- F-B：新增 `disconnects its observers when the view is torn down`；
+- F-E：样式表路径改为 `path.join(import.meta.dirname, "../styles.css")`。
+
+**候选更新**：`review-20260917-compaction-fix`（`w18`）→ `3721dd6`（合并补丁）+ 第三轮任务定义 `eb92526`；候选 `src/` 与补丁分支一致。
+候选态验证（Integrator 实测）：`typecheck` PASS、`npm test` PASS（15 files / **166 tests**）、`npm run build` PASS。
+
+**第三轮聚焦复审**：已向 `herzi_reviewer2`（`w18:p1`）派发，确认 `working`。要求逐条判断 F-A/F-B/F-D/F-E 为「已闭合 / 未闭合 / 有条件闭合」并附证据，特别要求：F-A 必须自己删 `observer.observe(viewport)` 做变异确认；F-D 若 jsdom 无法区分则明确写"只能代码审阅确认、浏览器可见性 NOT RUN"，**若实现者写了无法证伪的假测试要直接指出**；F-E 要在非仓库根 cwd 下验证并确认读的是被测树 CSS。
