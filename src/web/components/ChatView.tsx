@@ -55,6 +55,7 @@ import {
   toolRunVerb,
   type ToolDiff,
 } from "../toolCatalog";
+import { latestAssistantTurn, useLatestTurnActivity } from "../turnActivity";
 import {
   ChatImagePart,
   ComposerAddImage,
@@ -62,6 +63,7 @@ import {
   HerziImageAttachmentAdapter,
   ToolResultImagePreview,
 } from "./ChatAttachments";
+import { isPaneActive } from "../../shared/pane-activity";
 import type {
   ChatJsonObject,
   ChatMessage,
@@ -245,7 +247,7 @@ export function ChatView({
 }) {
   const [chat, setChat] = useState<ChatSnapshot>({
     paneId: pane.id,
-    running: pane.agentStatus === "working",
+    running: isPaneActive(pane.agentStatus),
     updatedAt: 0,
     messages: [],
   });
@@ -281,7 +283,7 @@ export function ChatView({
   useEffect(() => {
     setChat({
       paneId: pane.id,
-      running: pane.agentStatus === "working",
+      running: isPaneActive(pane.agentStatus),
       updatedAt: 0,
       messages: [],
     });
@@ -480,10 +482,30 @@ export function ChatView({
     }
   }, [deliveryEvents, pane.id]);
 
-  const running = realtime ? realtime.status !== "idle" : chat.running;
+  /**
+   * Fail-open "the pane is busy" signal for the composer and the working row:
+   * every source can keep it busy, and a source that goes quiet never clears it
+   * while another one still reports activity.
+   */
+  const running =
+    isPaneActive(pane.agentStatus) ||
+    chat.running ||
+    (realtime ? realtime.status !== "idle" : false);
+  /**
+   * The latest turn only, with the sticky marker that keeps it expanded until
+   * every source agrees the turn is over (fail-open, see `../turnActivity`).
+   */
+  const latestTurn = useMemo(() => latestAssistantTurn(messages), [messages]);
+  const latestTurnRunning = useLatestTurnActivity({
+    latestTurn,
+    sessionKey: `${pane.id}:${realtime?.runtimeId ?? "poll"}`,
+    chatRunning: chat.running,
+    realtimeStatus: realtime?.status ?? null,
+    paneStatus: pane.agentStatus,
+  });
   const displayMessages = useMemo(
-    () => groupAssistantTurns(messages, running),
-    [messages, running],
+    () => groupAssistantTurns(messages, latestTurnRunning),
+    [messages, latestTurnRunning],
   );
 
   const updatePendingDelivery = useCallback(
@@ -1396,7 +1418,7 @@ function groupActivityTools(items: ActivityItem[]): ActivityRenderItem[] {
 
 function groupAssistantTurns(
   messages: ChatMessage[],
-  running: boolean,
+  latestTurnRunning: boolean,
 ): DisplayMessage[] {
   const grouped: DisplayMessage[] = [];
   let index = 0;
@@ -1420,7 +1442,7 @@ function groupAssistantTurns(
     const isLatestTurn = index === messages.length;
     const turnRunning =
       assistantMessages.some((item) => item.status?.type === "running") ||
-      (running && isLatestTurn);
+      (latestTurnRunning && isLatestTurn);
     grouped.push(combineAssistantTurn(assistantMessages, turnStartedAt, turnRunning));
   }
 
@@ -1455,8 +1477,8 @@ function combineAssistantTurn(
   const workPart: DisplayPart = {
     type: "data-activity",
     data: {
-      // Stable across the whole turn: `DisplayMessage.id` changes while the turn
-      // is still growing, which is what used to collapse an expanded group.
+      // Stable across the whole turn: the group keeps its expansion state while
+      // the turn is still growing (see `../panelOpenState`).
       id: `work:${firstMessage.id}`,
       kind: "work",
       durationMs: Math.max(0, endedAt - startedAt),
@@ -1485,7 +1507,7 @@ function combineAssistantTurn(
   }
 
   return {
-    id: `turn:${lastMessage.id}`,
+    id: `turn:${firstMessage.id}`,
     role: "assistant",
     createdAt: firstMessage.createdAt,
     ...(lastMessage.completedAt ? { completedAt: lastMessage.completedAt } : {}),

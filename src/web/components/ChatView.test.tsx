@@ -518,6 +518,17 @@ function cell(row: HTMLElement, selector: string): string | null {
   return row.querySelector(selector)?.textContent ?? null;
 }
 
+/**
+ * Message ids as they reach the DOM. assistant-ui writes the `DisplayMessage`
+ * id of every message into `data-message-id`, so this is also what React uses
+ * as the key of the message subtree.
+ */
+function messageIds(): string[] {
+  return Array.from(document.querySelectorAll("[data-message-id]")).map(
+    (element) => element.getAttribute("data-message-id") ?? "",
+  );
+}
+
 describe("ChatView activity presentation", () => {
   beforeEach(() => {
     resetPanelOpenStores();
@@ -815,5 +826,126 @@ describe("ChatView activity presentation", () => {
     const row = document.querySelector(".work-group .tool-item") as HTMLDetailsElement;
     expect(row).toBeTruthy();
     expect(row.open).toBe(true);
+  });
+
+  it("keeps the latest turn expanded until the pane actually settles", async () => {
+    stubChat(
+      [
+        userMessage(),
+        assistantMessage("a1", [{ type: "text", text: "先做一半" }], {
+          status: { type: "running" },
+          completedAt: undefined,
+        }),
+      ],
+      true,
+    );
+
+    const { rerender } = render(
+      <ChatView pane={pane} realtime={{ ...realtimeTick(1), status: "working" }} />,
+    );
+    await screen.findByText("先做一半");
+    expect(document.querySelector(".work-group")).toBeNull();
+
+    // Gap between two model outputs: the message level signal is gone and the
+    // realtime status fell back to `idle`, but the pane is blocked (the agent is
+    // waiting for the user), so the turn is not over yet.
+    stubChat(
+      [
+        userMessage(),
+        assistantMessage("a1", [
+          { type: "text", text: "先做一半，然后在等你确认" },
+        ]),
+      ],
+      false,
+    );
+    rerender(
+      <ChatView
+        pane={{ ...pane, agentStatus: "blocked" }}
+        realtime={{ ...realtimeTick(2), status: "idle" }}
+      />,
+    );
+    await screen.findByText("先做一半，然后在等你确认");
+    expect(screen.queryByText(/Worked for/)).toBeNull();
+
+    // Settle: the pane reports `done` and every other source is idle as well.
+    rerender(
+      <ChatView
+        pane={{ ...pane, agentStatus: "done" }}
+        realtime={{ ...realtimeTick(3), status: "idle" }}
+      />,
+    );
+    await waitFor(() => expect(screen.getByText(/Worked for/)).toBeTruthy());
+  });
+
+  it("does not fold the latest turn while the polled snapshot still reports work", async () => {
+    stubChat(
+      [
+        userMessage(),
+        assistantMessage("a1", [{ type: "text", text: "先做一半" }], {
+          status: { type: "running" },
+          completedAt: undefined,
+        }),
+      ],
+      true,
+    );
+
+    const { rerender } = render(
+      <ChatView pane={pane} realtime={{ ...realtimeTick(1), status: "working" }} />,
+    );
+    await screen.findByText("先做一半");
+
+    // The bridge status fell back to `idle` for the same runtime (R1.3 in the
+    // bug report), but the pane is still working: one source going quiet must
+    // not fold the turn while another one still reports activity.
+    stubChat(
+      [
+        userMessage(),
+        assistantMessage("a1", [{ type: "text", text: "先做一半，还在跑" }]),
+      ],
+      true,
+    );
+    rerender(
+      <ChatView
+        pane={{ ...pane, agentStatus: "working" }}
+        realtime={{ ...realtimeTick(2), status: "idle" }}
+      />,
+    );
+    await screen.findByText("先做一半，还在跑");
+    expect(screen.queryByText(/Worked for/)).toBeNull();
+  });
+
+  it("keeps the turn's message id stable while the turn grows", async () => {
+    stubChat(
+      [
+        userMessage(),
+        assistantMessage("a1", [{ type: "text", text: "第一段" }]),
+        assistantMessage("a2", [{ type: "text", text: "第二段" }]),
+      ],
+      false,
+    );
+
+    const { rerender } = render(<ChatView pane={pane} realtime={realtimeTick(1)} />);
+    await screen.findByText("第二段");
+    const before = messageIds();
+    const turnNode = document.querySelector('[data-message-id^="turn:"]');
+    // The turn is keyed by its first message, never by its newest one.
+    expect(before).toContain("turn:a1");
+
+    stubChat(
+      [
+        userMessage(),
+        assistantMessage("a1", [{ type: "text", text: "第一段" }]),
+        assistantMessage("a2", [{ type: "text", text: "第二段" }]),
+        assistantMessage("a3", [{ type: "text", text: "第三段" }]),
+      ],
+      false,
+    );
+    rerender(<ChatView pane={pane} realtime={realtimeTick(2)} />);
+    await screen.findByText("第三段");
+
+    // Appending a message must not change any id, so React never remounts the
+    // turn subtree (which is what made the UI flicker and collapse groups).
+    expect(messageIds()).toEqual(before);
+    expect(document.querySelector('[data-message-id^="turn:"]')).toBe(turnNode);
   });
 });

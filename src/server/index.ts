@@ -18,6 +18,7 @@ import type {
   PromptResponse,
   ServerMessage,
 } from "../shared/protocol.js";
+import { isPaneActive } from "../shared/pane-activity.js";
 import {
   isPromptCorrelationId,
   parsePromptDeliveryEvent,
@@ -299,7 +300,7 @@ app.get<{ Params: { paneId: string } }>(
       return await piSessions.read(
         pane.id,
         sessionPath,
-        pane.agentStatus === "working",
+        isPaneActive(pane.agentStatus),
         piRealtime.getBranchLeafId(pane.id, sessionPath),
       );
     } catch (error) {
@@ -313,7 +314,7 @@ app.get<{ Params: { paneId: string } }>(
 function emptyChatSnapshot(pane: { id: string; agentStatus: string }): ChatSnapshot {
   return {
     paneId: pane.id,
-    running: pane.agentStatus === "working",
+    running: isPaneActive(pane.agentStatus),
     updatedAt: 0,
     messages: [],
   };
