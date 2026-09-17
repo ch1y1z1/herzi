@@ -79,3 +79,12 @@
 **3. 已生效的规则强化**
 
 - `AGENTS.md` §4：每个 Worker 交付在集成前必须由**独立 Reviewer** 审查（独立 worktree/分支、只读、只写 review 记录），findings 处置完毕才可集成。
+
+## 撤回（2026-09-17，按开发者决定）
+
+- 开发者决定：未获批准就合入 main 的集成**从 main 撤回**；修复与复审走正规流程并获批准后再合。
+- 执行：`git revert --no-edit 0a73bc4` → main `99015ed`。撤回了 8 个文件（含新增的 `src/shared/todo-tasks.ts` 与任务记录），保留规则提交 `6cd21ed`（独立 Reviewer + 逐批批准）。
+- 撤回后回归验证（main）：`npm run typecheck` PASS；`npm test` PASS（15 files / **117 tests**，与合入前基线一致）；`npm run build` PASS。
+- 未推送：`origin/main` 仍为 `4f537f3`。
+- 功能代码仍完整保存在 Worker 分支 `agent-20260917-compaction-todo`（commit `9af9eac`），未丢失。
+- 后续流程：新 Worker 做**系统性自查 + 修复** → **独立 Reviewer** 复审 → 向开发者请求批准 → 才允许合入 main。
