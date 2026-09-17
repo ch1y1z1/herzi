@@ -25,7 +25,8 @@
 | [`agent-collaboration-workflow.md`](./agent-collaboration-workflow.md) | 当前规范 | Agent 批次从规划、授权、worktree、派发、直接交互、review、集成、验证到批准和清理的完整流程 |
 | [`developer-agent-guide.md`](./developer-agent-guide.md) | 当前指南 | 开发者与主控、Worker、Reviewer 沟通的操作说明、权限边界和可直接复用的话术 |
 | [`agent-activity-rendering-reference.md`](./agent-activity-rendering-reference.md) | 调研完成、待决策 | Memoh（commit `1aaef83`，AGPL-3.0）如何组织 thinking / 工具 / 正文的展示，与 Herzi 现状对照及差距 |
-| [`chat-tool-presentation-plan.md`](./chat-tool-presentation-plan.md) | 方案完成、待决策 | Chat 过程展示增强：工具目录、语义化单行、组头汇总与 diff、thinking 时长、展开状态持久化，含分阶段与测试 |
+| [`chat-tool-presentation-plan.md`](./chat-tool-presentation-plan.md) | 已确认决策、正在实施 | Chat 过程展示增强：工具目录、语义化单行、组头汇总与 diff、thinking 时长、展开状态持久化，含分阶段与测试 |
+| [`chat-compaction-todo-askuser-plan.md`](./chat-compaction-todo-askuser-plan.md) | 可行性已核实、待决策 | 压缩分界（含分割 `Worked for` 组）、`todo` 列表展示、`ask_user_question` 展示与回答路径的可行性与设计 |
 | [`development-log.md`](./development-log.md) | 持续维护 | 实际代码变更、运行方法、真实冒烟结果、已知限制与后续工作 |
 | [`decisions/0001-terminal-backed-local-web-mvp.md`](./decisions/0001-terminal-backed-local-web-mvp.md) | Accepted | terminal-backed、单 runtime 所有权与本地 Web MVP 架构决策 |
 | [`research-log.md`](./research-log.md) | 持续维护 | 调研与验证过程流水账、版本、来源、更正和受限项 |
