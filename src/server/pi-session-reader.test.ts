@@ -447,6 +447,110 @@ describe("PiSessionReader compaction dividers", () => {
       at: 0,
     });
   });
+
+  it("keeps both dividers in branch order when they share a first kept entry", async () => {
+    const sessionPath = await writeSession([
+      messageEntry("m1", null, "user", "a", "2026-09-15T00:00:00.000Z"),
+      messageEntry("m2", "m1", "assistant", "b", "2026-09-15T00:00:10.000Z"),
+      {
+        type: "compaction",
+        id: "c1",
+        parentId: "m2",
+        timestamp: "2026-09-15T00:01:00.000Z",
+        summary: "first",
+        firstKeptEntryId: "m2",
+        tokensBefore: 10,
+      },
+      messageEntry("m3", "c1", "assistant", "c", "2026-09-15T00:02:00.000Z"),
+      {
+        type: "compaction",
+        id: "c2",
+        parentId: "m3",
+        timestamp: "2026-09-15T00:03:00.000Z",
+        summary: "second",
+        firstKeptEntryId: "m2",
+        tokensBefore: 20,
+      },
+      messageEntry("m4", "c2", "assistant", "d", "2026-09-15T00:04:00.000Z"),
+    ]);
+
+    const snapshot = await new PiSessionReader().read("pane-1", sessionPath, false);
+
+    // Both markers announce the same kept entry, so both land directly above it
+    // in branch order; message ids stay unique either way.
+    expect(snapshot.messages.map((message) => message.id)).toEqual([
+      "m1",
+      "divider:c1",
+      "divider:c2",
+      "m2",
+      "m3",
+      "m4",
+    ]);
+    expect(new Set(snapshot.messages.map((message) => message.id)).size).toBe(
+      snapshot.messages.length,
+    );
+  });
+
+  it("borrows the previous message timestamp for a divider that ends the branch", async () => {
+    const sessionPath = await writeSession([
+      messageEntry("m1", null, "user", "a", "2026-09-15T00:00:00.000Z"),
+      messageEntry("m2", "m1", "assistant", "b", "2026-09-15T00:00:10.000Z"),
+      {
+        type: "compaction",
+        id: "c1",
+        parentId: "m2",
+        timestamp: "2026-09-15T00:05:00.000Z",
+        summary: "tail",
+      },
+    ]);
+
+    const snapshot = await new PiSessionReader().read("pane-1", sessionPath, false);
+
+    // The compaction has no usable kept entry, so it falls back to its own (last)
+    // position, where no message follows: the ordering anchor then comes from the
+    // previous real message instead of the later compaction timestamp.
+    expect(snapshot.messages.map((message) => message.id)).toEqual([
+      "m1",
+      "m2",
+      "divider:c1",
+    ]);
+    const divider = snapshot.messages[2]!;
+    expect(divider.createdAt).toBe(snapshot.messages[1]!.createdAt);
+    expect(divider.content[0]).toMatchObject({
+      type: "divider",
+      at: Date.parse("2026-09-15T00:05:00.000Z"),
+    });
+  });
+
+  it("puts the divider before the next rendered message when the kept entry has none", async () => {
+    const sessionPath = await writeSession([
+      messageEntry("m1", null, "user", "a", "2026-09-15T00:00:00.000Z"),
+      messageEntry("m2", "m1", "assistant", "b", "2026-09-15T00:00:10.000Z"),
+      toolResultEntry("tr1", "m2", "2026-09-15T00:00:20.000Z", "bash", undefined),
+      messageEntry("m3", "tr1", "assistant", "c", "2026-09-15T00:00:30.000Z"),
+      {
+        type: "compaction",
+        id: "c1",
+        parentId: "m3",
+        timestamp: "2026-09-15T00:01:00.000Z",
+        summary: "kept a tool result",
+        firstKeptEntryId: "tr1",
+      },
+    ]);
+
+    const snapshot = await new PiSessionReader().read("pane-1", sessionPath, false);
+
+    // The kept entry is a tool result, which never becomes a chat message, so the
+    // semantic boundary cannot be shown exactly: the marker shifts to just before
+    // the next message that is rendered. This is a recorded degradation, pinned
+    // here so that a change of behaviour is noticed.
+    expect(snapshot.messages.map((message) => message.id)).toEqual([
+      "m1",
+      "m2",
+      "divider:c1",
+      "m3",
+    ]);
+  });
 });
 
 describe("PiSessionReader todo snapshots", () => {

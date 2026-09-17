@@ -1758,6 +1758,13 @@ function groupAssistantTurns(
  * between its work parts: a compaction in the middle of a turn must read as
  * `Worked for` → rule → `Worked for`, while a turn without a divider keeps its
  * single group exactly as before.
+ *
+ * Two order guarantees hold for every finished turn:
+ * - a group is inserted where its segment's first folded part was, never at the
+ *   end of the turn (folding must not move a group below the text it belongs
+ *   above); and
+ * - a divider is a real boundary: each segment is folded on its own, so the rule
+ *   sits between two groups and no work row of a segment is left outside it.
  */
 function combineAssistantTurn(
   messages: ChatMessage[],
@@ -1765,15 +1772,18 @@ function combineAssistantTurn(
   running: boolean,
 ): DisplayMessage {
   const parts = messages.flatMap((message) => message.content.map(toDisplayPart));
-  const finalOutputIndex = findLastOutputIndex(parts);
-  const activityLimit = finalOutputIndex >= 0 ? finalOutputIndex : parts.length;
   // Divider-only messages carry no output and no duration of their own, so they
   // must not stretch the turn: the compaction is written at an arbitrary moment
   // relative to the messages around it.
   const timedMessages = messages.filter((message) =>
     message.content.some((part) => part.type !== "divider"),
   );
-  const lastMessage = messages.at(-1)!;
+  // Status and completion time come from the last message that actually carried
+  // them: a trailing divider message has neither, so reading `messages.at(-1)`
+  // would describe the turn as status-less. Leaving the status off is
+  // DOM-neutral today (the runtime gives the thread's last message its status),
+  // but the display message should describe the real turn.
+  const lastTimedMessage = timedMessages.at(-1);
   const firstMessage = messages[0];
   const startedAt =
     validTimestamp(turnStartedAt) ??
@@ -1793,42 +1803,67 @@ function combineAssistantTurn(
     segment === 0 ? `work:${firstMessage.id}` : `work:${firstMessage.id}:${segment}`;
 
   const content: DisplayPart[] = [];
-  const pushWorkGroup = (segment: number, items: ActivityItem[]) => {
-    content.push({
-      type: "data-activity",
-      data: { id: workGroupId(segment), kind: "work", durationMs, items },
-    });
-  };
 
   if (running) {
     // While the turn can still grow, every part renders on its own; the group is
     // only built once the turn is over.
     content.push(...parts);
   } else {
+    // Every segment gets exactly one group per folded run, inserted where the
+    // segment's first folded part was: folding the parts must never move the
+    // group behind the parts it summarizes (that is the `组 → 正文` regression)
+    // or behind a divider.
+    //
+    // A divider is a real boundary, so each segment applies the turn rule on its
+    // own — everything before the segment's *own* last output is folded, and the
+    // rest stays visible. Without a divider there is exactly one segment, which
+    // makes this the unchanged `dc8282c` behaviour.
     let items: ActivityItem[] = [];
     let segment = 0;
-    parts.forEach((part, partIndex) => {
-      if (part.type === "data-divider") {
-        if (items.length) {
-          pushWorkGroup(segment, items);
-          segment += 1;
-          items = [];
+    let openGroup = false;
+    let segmentStart = 0;
+
+    const foldSegment = (segmentParts: DisplayPart[]) => {
+      const limit = segmentOutputLimit(segmentParts);
+      segmentParts.forEach((part, offset) => {
+        if (offset < limit && isWorkPart(part)) {
+          const item = toActivityItem(part);
+          // Unreachable: `isWorkPart` and `toActivityItem` cover the same types.
+          if (!item) return;
+          if (!openGroup) {
+            openGroup = true;
+            content.push({
+              type: "data-activity",
+              data: { id: workGroupId(segment), kind: "work", durationMs, items },
+            });
+          }
+          items.push(item);
+          return;
         }
         content.push(part);
-        return;
+      });
+      // A segment without foldable parts consumes no group number, and
+      // consecutive dividers therefore leave no empty group behind.
+      if (openGroup) {
+        openGroup = false;
+        items = [];
+        segment += 1;
       }
-      if (partIndex < activityLimit && isWorkPart(part)) {
-        const item = toActivityItem(part);
-        if (item) items.push(item);
-        return;
-      }
-      content.push(part);
-    });
-    if (items.length) pushWorkGroup(segment, items);
+    };
+
+    for (let index = 0; index <= parts.length; index += 1) {
+      const part = parts[index];
+      if (part && part.type !== "data-divider") continue;
+      foldSegment(parts.slice(segmentStart, index));
+      segmentStart = index + 1;
+      if (part) content.push(part);
+    }
 
     // A finished turn with no work rows still shows how long it ran — but only
     // when it has a real message to time. A turn made of divider messages only
-    // gets no fabricated `Worked for` row.
+    // gets no fabricated `Worked for` row. The row is inserted once per turn,
+    // before the turn's last output, so a turn whose segments all fold nothing
+    // still reports its span exactly once (the pre-existing `dc8282c` rule).
     if (
       timedMessages.length > 0 &&
       !content.some((part) => part.type === "data-activity")
@@ -1845,9 +1880,11 @@ function combineAssistantTurn(
     id: `turn:${firstMessage.id}`,
     role: "assistant",
     createdAt: firstMessage.createdAt,
-    ...(lastMessage.completedAt ? { completedAt: lastMessage.completedAt } : {}),
+    ...(lastTimedMessage?.completedAt
+      ? { completedAt: lastTimedMessage.completedAt }
+      : {}),
     content: groupConsecutiveTools(content),
-    ...(lastMessage.status ? { status: lastMessage.status } : {}),
+    ...(lastTimedMessage?.status ? { status: lastTimedMessage.status } : {}),
   };
 }
 
@@ -1947,6 +1984,16 @@ function findLastOutputIndex(parts: DisplayPart[]): number {
     if (part.type === "image" || (part.type === "text" && part.text.trim())) return index;
   }
   return -1;
+}
+
+/**
+ * Cut-off of one segment: everything before the segment's own last output is
+ * folded into its `Worked for` group. A segment without output folds all of its
+ * work; an empty one folds nothing.
+ */
+function segmentOutputLimit(segmentParts: DisplayPart[]): number {
+  const lastOutput = findLastOutputIndex(segmentParts);
+  return lastOutput >= 0 ? lastOutput : segmentParts.length;
 }
 
 function validTimestamp(value: number | undefined): number | undefined {
