@@ -107,3 +107,10 @@
   - 删除 `/tmp/pi-cadence-test`（测试 Pane 的工作目录）与 `/tmp/memoh-ref`（Memoh 参考克隆，约 65 MB）——Memoh 的结论已落盘到 `docs/agent-activity-rendering-reference.md`，后续 `ask_user_question` 讨论依据的是本机 `@juicesharp/rpiv-*` 代码而非 Memoh。
   - 删除了 `/tmp/herzi-repro.log` 等临时输出。
 - 结论：本轮全部临时资源已清空；仍在使用的只有 `agent-20260917-compaction-todo`（w16）。
+
+### 清理记录（2026-09-17 第二轮）
+
+- 合入并 push 后按开发者决定清理：
+  - 核对 `agent-20260917-compaction-fix` 与 `review-20260917-compaction-fix` 相对 main **均无独有文件**（各 0 个），两个 worktree 均 clean。
+  - 删除各自 gitignored 的 `node_modules`/`dist`，用 `herdr worktree remove` 移除（`forced: false`），再删除两个分支。
+  - 结果：本地只剩 `main` 分支与主 worktree；`/Users/chiyizi/.herdr/worktrees/herzi/` 已空；Herdr 工作区只剩 `wT general` 与 `wW herzi`。
