@@ -112,3 +112,27 @@
 **独立 Reviewer**：`herzi_reviewer2`（`w18:p1`）—— 与实现者、修复者均非同一 Agent；只读产品代码、只写 review 记录；已发送复审 prompt 并确认 `working`。
 
 **下一步**：Reviewer 完成后由开发者通知 Integrator → 汇报 findings 与处置建议 → **由开发者决定是否批准合入 main**（未获批准不得合入）。
+
+## 独立复审结论与后续决定（2026-09-17）
+
+**Reviewer**：`herzi_reviewer2`（`w18:p1`），与实现者、修复者均非同一 Agent；只读产品代码，只写 review 记录 `304a6b9`。
+
+**结论：可合入，无阻断，无 P0/P1。** 其独立验证方式（不采信修复者 claim）：
+
+- 用它自己的两套 DOM 方法取文档顺序（明确拒绝复用修复者的 landmark 函数），覆盖 13 种形状 → 顺序全部正确（组在正文之前）。
+- 9 个变异测试：忠实复现旧 bug 的 M1 被它的断言抓出 7 条失败、修复者断言抓出 6 条 → 断言可证伪。
+- 与撤回前已批准状态 `dc8282c` 在 16 个形状上**逐字节一致**（含运行中 3 形状）。
+- 三棵树各自原始测试全绿：`dc8282c` 117、`9af9eac` 137、候选 157 → 证实"137 全绿也没抓住 B1"。
+- 越界核对：修复只落 4 个文件；`protocol.ts` 纯新增；功能实现自 `9af9eac` 起未被悄悄改动。
+
+**Findings**：F1(P2) 展开 todo 条遮住正文尾部（`.chat-viewport` 底部预留写死 176px，footer 实际涨到约 390px；真实像素未测，NOT RUN）；F2(P3) `isTodoDetails` 用未被使用的 `nextId` 把关，非数字即静默丢弃整份快照；F3(P3) 超限降级与设计文档不一致；F4(P3) `at:0` 同 kind 分界共享展开状态；F5(P3) 分界借用 `createdAt` 的去重键理论风险（未构造出触发场景）；F6(P3) todo 条折叠时列表仍进 DOM 且行数无上限；F7(P3，**既有问题**) 测试辅助 `promptCalls` 过滤过宽导致高负载偶发失败；F8(P3) `firstKeptEntryId` 指向无消息 entry 时横线顺延；F9(信息) 分界会改变 turn run 首条 id，无可观察差异。
+
+**开发者决定（2026-09-17）**：
+1. **先修 F1 + F2，再合入**；
+2. F1/F2 由**原修复者** `herzi_audit`（`w17`）在其分支上修，修完由**同一位独立 Reviewer** `herzi_reviewer2` 复验；
+3. 修完后由 Integrator 在隔离环境用 browser-use **实测一次真实遮挡像素**；
+4. **等合入时一起 push**（`origin/main` 暂不更新）。
+
+**F1 的实现方向（Integrator 指定）**：让正文底部预留跟随 `.chat-footer` 实际高度（ResizeObserver → CSS 变量，176px 作为初始/回退值），并必须提供不依赖 ResizeObserver 的保守回退预留；回退路径需可被测试断言，真实遮挡像素标 NOT RUN。
+
+已向 `herzi_audit`（`w17:p1`）派发 F1+F2 修复，确认状态 `working`。
