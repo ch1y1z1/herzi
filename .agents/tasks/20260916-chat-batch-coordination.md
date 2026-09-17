@@ -127,3 +127,10 @@
   初步判断为 `ChatView` 在响应后用 `window.setTimeout(..., 250)` 触发 `loadChat`，该定时器未在 unmount 时清理；测试 `afterEach` 已 `unstubAllGlobals()`，于是原生的 Node fetch 收到相对 URL 而报错。属测试期偶发噪声，未影响测试通过，也未在第二轮集成态复现；待后续清理定时器时一并修掉。
 - 未执行：真实 Pi/Herdr 端到端、真实 HTTP/WS 与浏览器验收、browser-use/CUA 实测，均为 `NOT RUN`。
 - 未 push `origin/main`；Worker A/B 与 Reviewer 的 worktree、branch 全部保留未清理。
+
+## 推送 origin/main
+
+- 开发者明确授权 push。
+- 推送前检查：`git remote -v` 为 `git@github.com:ch1y1z1/herzi.git`；工作树 clean；待推送 19 个 commit、37 个文件（+7636/−60）。
+- 敏感信息扫描：未发现 API key、私钥、credential 文件或真实 Pi session 路径；命中的 “token” 均为设计讨论用词（token streaming、request token、integration token 等）。
+- 推送结果：`0097dc4..833070c main -> main`；fetch 后本地 `main` 与 `origin/main` 均为 `833070c`，无 ahead/behind。
