@@ -34,6 +34,7 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -301,13 +302,19 @@ const CHAT_FOOTER_TODO_BAR_PX = 320;
  * observed at all, and a footer that reports zero height has not been laid out
  * yet (first frame, hidden pane, jsdom). Reserving the conservative height in
  * both cases beats reserving a number that a later expansion would invalidate.
+ *
+ * A layout effect, not a passive one: the todo bar's expansion state survives a
+ * remount (`panelOpenState` is per pane) while ChatView is remounted on every
+ * Terminal↔Chat and pane switch (`key={pane.id}`). With a passive effect the
+ * first painted frame of such a remount would still use the stylesheet's 176px
+ * fallback although the footer is already tall (review finding F-D).
  */
 function useChatFooterInset(
   viewport: HTMLDivElement | null,
   footer: HTMLDivElement | null,
   reserveTodoBar: boolean,
 ): void {
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!viewport || !footer) return;
     const fallbackPx =
       CHAT_FOOTER_MIN_RESERVE_PX + (reserveTodoBar ? CHAT_FOOTER_TODO_BAR_PX : 0);
