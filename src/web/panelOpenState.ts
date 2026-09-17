@@ -1,12 +1,13 @@
 /**
  * Expansion state for the activity groups and rows in Chat.
  *
- * `DisplayMessage.id` is `turn:<last message id>` and therefore changes while a
- * turn is still streaming; React then treats the message as new and a native
- * `<details>` would lose its `open` attribute. The state is kept outside React
- * instead, keyed by a stable identifier per pane, so a group that was expanded
- * while streaming stays expanded once the same items are re-rendered inside the
- * finished `Worked for` group.
+ * `DisplayMessage.id` used to be `turn:<last message id>` and therefore changed
+ * while a turn was still streaming; React then treated the message as new and a
+ * native `<details>` lost its `open` attribute. The turn key is now stable
+ * (`turn:<first message id>`), but the state is still kept outside React,
+ * keyed by a stable identifier per pane, so a group that was expanded while
+ * streaming stays expanded once the same items are re-rendered inside the
+ * finished `Worked for` group and across remounts.
  *
  * The store itself has no React dependency; `usePanelOpenState` binds it to a
  * component through `useSyncExternalStore`.

@@ -157,7 +157,9 @@ interface ToolDisplay {
 
 ### 4.6 展开状态持久化（建议一并做）
 
-现状问题：`DisplayMessage.id` 是 `turn:${lastMessage.id}`，同一 turn 里新增一条 assistant 消息就会改变 id → React 视为新组件 → 原生 `<details>` 的 `open` 状态丢失。用户流式期间展开的组会在 turn 结束时弹回收起。
+现状问题：`DisplayMessage.id` 当时是 `turn:${lastMessage.id}`，同一 turn 里新增一条 assistant 消息就会改变 id → React 视为新组件 → 原生 `<details>` 的 `open` 状态丢失，用户流式期间展开的组会在 turn 结束时弹回收起。
+
+> **后续更正（2026-09-17）**：该 id 已在 bug 修复中改为 `turn:${firstMessage.id}`（稳定 key），但展开状态持久化仍然保留 —— 组件在 Pane 切换、折叠重组等情况下依旧会重挂载，且持久化让“流式期间展开 → 完成后仍展开”不依赖 React 的重用行为。见 `.agents/tasks/20260917-worked-for-premature-group-bug.md`。
 
 方案：新增一个 session 级 Map（上限 LRU），键为 `(paneId + 工具/思考项稳定标识)`，值为展开状态；组与行都通过受控的 `open` 读写它。标识用现有稳定 id（`toolCallId`、reasoning 的 `messageId+索引`）。
 
