@@ -161,3 +161,14 @@
   - 主工作区 `main` 未受影响，未删除任何 branch。
 - 未处理：主工作区 `wW:p4` 是一个无 agent 的普通 shell Pane，不是本批次创建，保持原样。
 - 保留未删除：四个本批次 branch（`integration-20260916-chat-reliability`、`agent-20260916-markdown-links`、`agent-20260916-prompt-observability`、`review-20260916-chat-reliability`），等待开发者单独确认。
+
+## 分支清理与推送
+
+- 删除前复核：四个 branch 相对 main 均无“main 缺失的文件”（`comm` 检查均为 0）；两份复审记录与 review branch 逐字节一致。
+- 已删除（`git branch -D`，因内容是 cherry-pick 而非 merge，故非 fast-forward 判定）：
+  - `integration-20260916-chat-reliability`（was 9af6505）
+  - `agent-20260916-markdown-links`（was eaf19a5）
+  - `agent-20260916-prompt-observability`（was 3e7c5e5）
+  - `review-20260916-chat-reliability`（was 7ffe565）
+- 删除后本地仅剩 `main`。
+- 开发者授权推送 main 上的清理记录 commit。
