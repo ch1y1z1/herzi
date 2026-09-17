@@ -1973,35 +1973,60 @@ describe("ChatView footer reservation", () => {
   }
 
   /**
-   * jsdom never runs a ResizeObserver, so the tests drive the observer by hand.
-   * Only callbacks registered for the footer are collected; assistant-ui registers
-   * one for the same element, and both callbacks only re-read it.
+   * jsdom never runs a ResizeObserver, so the tests drive the observers by hand.
+   * Every instance records what it was told to watch and whether it was torn
+   * down; assistant-ui registers observers of its own for the same elements, and
+   * all of their callbacks only re-read the element they watch.
    */
-  function stubResizeObserver(): Array<() => void> {
-    const footerCallbacks: Array<() => void> = [];
+  interface StubObserver {
+    targets: Set<Element>;
+    callback: ResizeObserverCallback;
+    disconnected: boolean;
+  }
+
+  function stubResizeObserver(): StubObserver[] {
+    const observers: StubObserver[] = [];
     vi.stubGlobal(
       "ResizeObserver",
       class {
-        callback: ResizeObserverCallback;
+        state: StubObserver;
         constructor(callback: ResizeObserverCallback) {
-          this.callback = callback;
+          this.state = { targets: new Set(), callback, disconnected: false };
+          observers.push(this.state);
         }
         observe(target: Element) {
-          if (target.classList.contains("chat-footer")) {
-            footerCallbacks.push(() =>
-              this.callback([], this as unknown as ResizeObserver),
-            );
-          }
+          this.state.targets.add(target);
         }
-        unobserve() {}
-        disconnect() {}
+        unobserve(target: Element) {
+          this.state.targets.delete(target);
+        }
+        disconnect() {
+          this.state.disconnected = true;
+        }
       },
     );
-    return footerCallbacks;
+    return observers;
   }
 
-  it("follows the space the fixed footer covers", async () => {
-    const footerCallbacks = stubResizeObserver();
+  function observersWatching(
+    observers: StubObserver[],
+    className: string,
+  ): StubObserver[] {
+    return observers.filter((observer) =>
+      Array.from(observer.targets).some((target) =>
+        target.classList.contains(className),
+      ),
+    );
+  }
+
+  function notifyObservers(observers: StubObserver[]): void {
+    for (const observer of observers) {
+      observer.callback([], {} as ResizeObserver);
+    }
+  }
+
+  it("watches the pane's bottom edge with the same observer as the footer", async () => {
+    const observers = stubResizeObserver();
     stubChat(chatMessages(), false, todoSnapshot());
 
     render(<ChatView pane={pane} />);
@@ -2009,7 +2034,61 @@ describe("ChatView footer reservation", () => {
 
     const viewport = document.querySelector(".chat-viewport") as HTMLElement;
     const footer = document.querySelector(".chat-footer") as HTMLElement;
-    expect(footerCallbacks.length).toBeGreaterThan(0);
+
+    // An observer only reports *size* changes, and the pane's bottom edge moves
+    // without the footer changing size (window resize, the sidebar on narrow
+    // screens), so the observer that watches the footer has to watch the viewport
+    // too. The assertion has to be about one instance watching both: assistant-ui
+    // registers observers for these elements separately, so "some observer watches
+    // the viewport" would stay green if our own registration disappeared.
+    expect(
+      observers.some(
+        (observer) => observer.targets.has(footer) && observer.targets.has(viewport),
+      ),
+    ).toBe(true);
+
+    // …and that registration is what keeps the reservation current: moving only
+    // the pane's bottom edge must be enough to update it.
+    Object.defineProperty(footer, "offsetHeight", { value: 421, configurable: true });
+    stubRect(viewport, 100, 900);
+    stubRect(footer, 420, 841);
+    notifyObservers(observersWatching(observers, "chat-footer"));
+    expect(footerInsetVar()).toBe("480px");
+
+    stubRect(viewport, 100, 1000); // the pane grew by 100px
+    notifyObservers(observersWatching(observers, "chat-viewport"));
+    expect(footerInsetVar()).toBe("580px");
+  });
+
+  it("disconnects its observers when the view is torn down", async () => {
+    const observers = stubResizeObserver();
+    stubChat(chatMessages(), false, todoSnapshot());
+
+    const view = render(<ChatView pane={pane} />);
+    await screen.findByText("hi");
+
+    const watchingFooter = observersWatching(observers, "chat-footer");
+    expect(watchingFooter.length).toBeGreaterThan(0);
+    expect(watchingFooter.every((observer) => observer.disconnected)).toBe(false);
+
+    view.unmount();
+
+    // ChatView remounts on every pane and Terminal↔Chat switch (`key={pane.id}`),
+    // and the effect replaces its observer whenever its dependencies change, so a
+    // missing `disconnect()` would leave one watcher behind per switch.
+    expect(watchingFooter.every((observer) => observer.disconnected)).toBe(true);
+  });
+
+  it("follows the space the fixed footer covers", async () => {
+    const observers = stubResizeObserver();
+    stubChat(chatMessages(), false, todoSnapshot());
+
+    render(<ChatView pane={pane} />);
+    await screen.findByText("hi");
+
+    const viewport = document.querySelector(".chat-viewport") as HTMLElement;
+    const footer = document.querySelector(".chat-footer") as HTMLElement;
+    expect(observersWatching(observers, "chat-footer").length).toBeGreaterThan(0);
     // Nothing has been laid out, so the conservative reservation has to hold.
     expect(footerInsetVar()).toBe("496px");
 
@@ -2017,18 +2096,18 @@ describe("ChatView footer reservation", () => {
     Object.defineProperty(footer, "offsetHeight", { value: 421, configurable: true });
     stubRect(viewport, 100, 900);
     stubRect(footer, 420, 841);
-    for (const notify of footerCallbacks) notify();
+    notifyObservers(observersWatching(observers, "chat-footer"));
     expect(footerInsetVar()).toBe("480px");
 
     // …and an expanded todo bar moves that edge up, which the reservation has to
     // follow; that is what kept the end of the transcript reachable.
     stubRect(footer, 300, 721);
-    for (const notify of footerCallbacks) notify();
+    notifyObservers(observersWatching(observers, "chat-footer"));
     expect(footerInsetVar()).toBe("600px");
   });
 
   it("never reserves less than the previous constant", async () => {
-    const footerCallbacks = stubResizeObserver();
+    const observers = stubResizeObserver();
     stubChat(chatMessages(), false);
 
     render(<ChatView pane={pane} />);
@@ -2041,7 +2120,7 @@ describe("ChatView footer reservation", () => {
     Object.defineProperty(footer, "offsetHeight", { value: 120, configurable: true });
     stubRect(viewport, 100, 900);
     stubRect(footer, 880, 1000);
-    for (const notify of footerCallbacks) notify();
+    notifyObservers(observersWatching(observers, "chat-footer"));
     expect(footerInsetVar()).toBe("176px");
   });
 
@@ -2050,13 +2129,13 @@ describe("ChatView footer reservation", () => {
     // hidden footer looks like in a real browser too. A live observer may still
     // correct the value later, so the reservation has to be conservative until
     // it does: otherwise expanding the bar would hide transcript content.
-    const footerCallbacks = stubResizeObserver();
+    const observers = stubResizeObserver();
     stubChat(chatMessages(), false, todoSnapshot());
 
     render(<ChatView pane={pane} />);
     await screen.findByText("hi");
 
-    expect(footerCallbacks.length).toBeGreaterThan(0);
+    expect(observersWatching(observers, "chat-footer").length).toBeGreaterThan(0);
     const reserved = Number.parseInt(footerInsetVar(), 10);
     // Base footer plus at least the list `max-height` the bar can reach.
     expect(reserved).toBeGreaterThanOrEqual(176 + 260);
@@ -2086,11 +2165,13 @@ describe("ChatView footer reservation", () => {
   });
 
   it("keeps the stylesheet wired to the footer inset variable", () => {
-    // jsdom does not resolve `var()` in the cascade, so the contract between
-    // this component and the layout is asserted on the rule itself: without the
-    // `padding-bottom` below, the variable above would change nothing.
+    // jsdom does not resolve `var()` in the cascade, so the contract between this
+    // component and the layout is asserted on the rule itself: without the
+    // `padding-bottom` below, the variable above would change nothing. The path is
+    // anchored to this test file, so the assertion reads the stylesheet of the tree
+    // under test no matter which directory vitest is started from.
     const source = readFileSync(
-      path.join(process.cwd(), "src/web/styles.css"),
+      path.join(import.meta.dirname, "../styles.css"),
       "utf8",
     );
     const viewportRules = Array.from(
