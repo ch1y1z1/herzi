@@ -74,7 +74,6 @@ import type {
   ChatPart,
   ChatRealtimeState,
   ChatSnapshot,
-  ChatTodosSnapshot,
   PaneSummary,
   PromptDeliveryEvent,
   PromptDeliveryStatus,
@@ -260,6 +259,99 @@ function shortRequestId(requestId: string): string {
   return requestId.length > 8 ? requestId.slice(0, 8) : requestId;
 }
 
+/**
+ * Custom property holding how much of the transcript's bottom edge is covered by
+ * the fixed footer overlay. `.chat-viewport` reserves exactly that much space at
+ * its bottom (see the `.chat-viewport` rule in `../styles.css`), so the last
+ * transcript line can always be scrolled above the footer.
+ *
+ * It is the footer's *inset*, not its height: the footer floats 35px above the
+ * window while the transcript pane ends 19px above it, so the space to keep
+ * clear is the footer's height plus that 16px gap. Those are the CSS values of
+ * today; the reservation is measured, so it does not depend on them.
+ */
+const CHAT_FOOTER_INSET_VAR = "--chat-footer-inset";
+
+/**
+ * Reservation used before the footer is measured: the previous hard-coded
+ * value, which is also the CSS fallback of the custom property.
+ */
+const CHAT_FOOTER_MIN_RESERVE_PX = 176;
+
+/**
+ * Worst case a rendered todo bar adds on top of the base footer: the list's
+ * `max-height: 260px` (see `.todo-list` in `../styles.css`) plus the bar's
+ * summary row, border, margin and padding. Kept slightly above the sum so the
+ * fallback below never under-reserves.
+ */
+const CHAT_FOOTER_TODO_BAR_PX = 320;
+
+/**
+ * Keeps the transcript's bottom reservation in sync with the space the fixed
+ * footer really covers.
+ *
+ * The footer is a `position: fixed` overlay, so it does not push the transcript
+ * up by itself: the viewport has to reserve its footprint. A constant was
+ * correct until the todo bar could be expanded, which roughly doubles the footer
+ * height and buried the end of the transcript behind it (review finding F1).
+ *
+ * The reservation never depends on the observer for its value: the fallback is
+ * computed from the known state and used whenever there is no *live* measurement
+ * — without `ResizeObserver` (jsdom, old browsers) the height can never be
+ * observed at all, and a footer that reports zero height has not been laid out
+ * yet (first frame, hidden pane, jsdom). Reserving the conservative height in
+ * both cases beats reserving a number that a later expansion would invalidate.
+ */
+function useChatFooterInset(
+  viewport: HTMLDivElement | null,
+  footer: HTMLDivElement | null,
+  reserveTodoBar: boolean,
+): void {
+  useEffect(() => {
+    if (!viewport || !footer) return;
+    const fallbackPx =
+      CHAT_FOOTER_MIN_RESERVE_PX + (reserveTodoBar ? CHAT_FOOTER_TODO_BAR_PX : 0);
+
+    let observer: ResizeObserver | null = null;
+
+    /**
+     * Space between the footer's top edge and the pane's bottom edge, or `null`
+     * when there is nothing to measure or nothing that would report a change.
+     */
+    const measureInset = (): number | null => {
+      if (observer === null) return null;
+      // A footer without height has not been laid out (jsdom, first frame).
+      if (!Number.isFinite(footer.offsetHeight) || footer.offsetHeight <= 0) {
+        return null;
+      }
+      return Math.round(
+        viewport.getBoundingClientRect().bottom - footer.getBoundingClientRect().top,
+      );
+    };
+
+    const apply = () => {
+      const measured = measureInset();
+      // Never reserve less than the constant that was already in use, so this can
+      // only ever make the transcript *more* visible, never less.
+      const reserve =
+        measured === null
+          ? fallbackPx
+          : Math.max(measured, CHAT_FOOTER_MIN_RESERVE_PX);
+      viewport.style.setProperty(CHAT_FOOTER_INSET_VAR, `${reserve}px`);
+    };
+
+    if (typeof ResizeObserver !== "undefined") {
+      observer = new ResizeObserver(apply);
+      // The footer growing is the interesting case, but the pane's own bottom can
+      // move too (window resize, the sidebar opening on narrow screens).
+      observer.observe(footer);
+      observer.observe(viewport);
+    }
+    apply();
+    return () => observer?.disconnect();
+  }, [footer, viewport, reserveTodoBar]);
+}
+
 export function ChatView({
   pane,
   realtime,
@@ -300,6 +392,27 @@ export function ChatView({
   const acknowledgedDoneRef = useRef(false);
   const reconciledRef = useRef(new Set<string>());
   const appliedDeliveryEventsRef = useRef(new Set<string>());
+  /**
+   * The fixed footer and the viewport whose bottom padding follows the space it
+   * covers. Kept as state (not refs) so the measuring effect re-runs if either
+   * element is ever replaced, and so the reservation is applied as soon as both
+   * exist.
+   */
+  const [chatViewportElement, setChatViewportElement] =
+    useState<HTMLDivElement | null>(null);
+  const [chatFooterElement, setChatFooterElement] = useState<HTMLDivElement | null>(
+    null,
+  );
+  /** Tasks the todo bar really shows: tombstones never render (decision P6). */
+  const visibleTodoTasks = useMemo(
+    () => (chat.todos?.tasks ?? []).filter((task) => task.status !== "deleted"),
+    [chat.todos],
+  );
+  useChatFooterInset(
+    chatViewportElement,
+    chatFooterElement,
+    visibleTodoTasks.length > 0,
+  );
   const imageAttachmentAdapter = useMemo(
     () => new HerziImageAttachmentAdapter(pane.id),
     [pane.id],
@@ -807,7 +920,10 @@ export function ChatView({
   return (
     <AssistantRuntimeProvider runtime={runtime}>
       <ThreadPrimitive.Root className="chat-thread">
-        <ThreadPrimitive.Viewport className="chat-viewport">
+        <ThreadPrimitive.Viewport
+          className="chat-viewport"
+          ref={setChatViewportElement}
+        >
           <ThreadPrimitive.Empty>
             <div className="chat-empty">
               <Brain size={24} />
@@ -834,7 +950,10 @@ export function ChatView({
             </div>
           )}
 
-          <ThreadPrimitive.ViewportFooter className="chat-footer">
+          <ThreadPrimitive.ViewportFooter
+            className="chat-footer"
+            ref={setChatFooterElement}
+          >
             <ThreadPrimitive.ScrollToBottom className="scroll-to-bottom">
               <ArrowDown size={15} />
             </ThreadPrimitive.ScrollToBottom>
@@ -850,7 +969,7 @@ export function ChatView({
                 {deliveryError.message}
               </div>
             )}
-            <TodoStatusBar todos={chat.todos} />
+            <TodoStatusBar tasks={visibleTodoTasks} />
             <ComposerPrimitive.Root className="chat-composer">
               <ComposerPrimitive.AttachmentDropzone className="composer-dropzone">
                 <ComposerAttachments />
@@ -1561,17 +1680,14 @@ const TODO_COUNT_LABELS: Record<TodoGroupStatus, string> = {
 /**
  * Collapsible todo bar above the composer.
  *
- * It mirrors what the `todo` extension reports for this session: every task
- * whose status is not `deleted` (tombstones are never shown). An empty list —
+ * It mirrors what the `todo` extension reports for this session; the parent
+ * filters the tombstones out and uses the same list to know whether the fixed
+ * footer needs the taller reservation (`useChatFooterInset`). An empty list —
  * including a snapshot that had to be degraded for size — renders nothing at
  * all instead of an empty container. The list refreshes with the existing 1.5s
  * chat poll; there is no separate push channel.
  */
-function TodoStatusBar({ todos }: { todos?: ChatTodosSnapshot }) {
-  const tasks = useMemo(
-    () => (todos?.tasks ?? []).filter((task) => task.status !== "deleted"),
-    [todos],
-  );
+function TodoStatusBar({ tasks }: { tasks: TodoTask[] }) {
   const [open, setOpen] = usePanelOpenState(TODO_PANEL_KEY);
   if (!tasks.length) return null;
 

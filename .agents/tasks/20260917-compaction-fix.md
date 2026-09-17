@@ -1,6 +1,6 @@
 # Worker 任务契约：压缩分界 + todo 状态条的系统性自查与修复
 
-- 状态：**自查 + 修复完成，本地验证完成，待独立 Reviewer 复审**（详见文末「执行记录」）
+- 状态：**第一轮自查/修复 + 第二轮 Reviewer findings（F1/F2）修复完成，本地验证完成，待同一独立 Reviewer 复验**（详见文末两份执行记录）
 - 角色：Worker（单 Agent，**新 Agent，不是原实现者**）
 - Base：`9af9eac`（原实现 commit，位于分支 `agent-20260917-compaction-todo`）
 - Branch：`agent-20260917-compaction-fix`
@@ -277,3 +277,130 @@ LANDMARK_OUT=/tmp/herzi-landmarks-new2.json npx vitest run src/web/components/or
 
 - 建议 Reviewer 重点检查：`ChatView.tsx` 的 `combineAssistantTurn()` / `segmentOutputLimit()`（决策 A 的段语义与段号唯一性）、`ChatView.test.tsx` 的 landmark 辅助函数是否真的能看见顺序、以及 §6.1 的去重键暴露面是否接受。
 - 本分支未 push；合入 `main` 需开发者逐批批准，随后由 Integrator 集成。
+
+---
+
+# 第二轮：Reviewer findings F1 / F2 处理记录（2026-09-17）
+
+- 状态：**F1、F2 已修复并本地验证完成，待同一独立 Reviewer 复验**
+- 依据：独立复审记录 `/Users/chiyizi/.herdr/worktrees/herzi/review-20260917-compaction-fix/.agents/tasks/20260917-compaction-review.md`（只读；F1 = P2 遮挡，F2 = P3 用未使用字段把关）；开发者决定「修完这两项 → 同一 Reviewer 复验 → 批准合入」
+- 改动范围：`src/shared/todo-tasks.ts`、`src/shared/protocol.ts`（仅放宽）、`src/web/components/ChatView.tsx`、`src/web/styles.css`、`src/web/components/ChatView.test.tsx`、`src/server/pi-session-reader.test.ts` + 本记录。未碰 `toolCatalog.ts` / `panelOpenState.ts` / `turnActivity.ts` / `pane-activity.ts` / `src/server/index.ts` / `pi-realtime.ts` / `integrations/`
+- 未运行 `npm run dev`、未操作真实 Pane、未 merge/rebase/push、未新增 production dependency
+
+## 1. F1：展开 todo 条遮挡正文尾部（P2）
+
+### 1.1 方案与理由
+
+原来的 `.chat-viewport` 写死 `padding-bottom: 176px`，而 `.chat-footer` 是 `position: fixed` 浮层；todo 条展开后 footer 变高，多出来的部分永久压住正文尾部。修法：**测量 footer 实际占用的空间，写进 CSS 变量，`padding-bottom` 跟随它**。
+
+两点必须说明的偏离/取舍（都与「更准确」有关，不是简化）：
+
+1. **变量含义是 footer 的「inset」，不是 footer 的「height」**（变量名因此是 `--chat-footer-inset`，而不是建议里的 `--chat-footer-height`）。
+   理由：footer 是相对**窗口**定位的（`.chat-footer { bottom: 35px }`），而正文滚动容器的底边在窗口上方 19px（`.app-shell` 18px padding + `.app-window` 1px border），两者相差 16px。正文真正要让出的空间是 `footer 高度 + 16`，只预留高度会少 16px。
+   代码不写死这 16px，而是直接量 `viewport.getBoundingClientRect().bottom - footer.getBoundingClientRect().top`——即「footer 顶边到正文底边的实际距离」，与窗口尺寸、响应式断点（移动端 `.chat-footer { bottom: 16px }`）、app 外壳 padding 无关，窗口缩放时也自动跟着变。
+2. **下界保留 176px**：`reserve = max(measured, 176)`。这样改动只可能让正文更可见、绝不会比改动前更少（176 是已在生产上跑的常量，用它兜住「我们对布局的判断可能有偏差」的风险）。todo 条撑高 footer 后，实测值超过 176，预留随之上浮——这正是 F1 要修的部分。
+
+### 1.2 回退策略（不依赖 ResizeObserver 的那条路）
+
+- 预留值**本身从不依赖观测**：当无法得到「活的」测量时，直接用由已知状态算出的保守值：
+  - 无 todo 条：`176px`（原常量）；
+  - 渲染了 todo 条：`176 + 320 = 496px`，其中 320 = `.todo-list` 的 `max-height: 260px` + 条的 summary 行、边框、外边距、列表内边距（上取整，宁多不少）。
+- 「没有活的测量」= ①没有 `ResizeObserver`，或 ②footer 报告高度 ≤ 0（首帧、隐藏面板、jsdom 都属此类）。**在无可观测时故意预留展开后的最坏值**，因为那种情况下后续展开不会再有任何回调来修正预留。
+- 诚实说明：本应用**整体**其实还离不开 `ResizeObserver`——`assistant-ui` 的 `ViewportFooter` 会无条件 `new ResizeObserver(...)`（我在测试里把全局置为 `undefined` 时，component 直接抛 `ResizeObserver is not a constructor`）。所以「浏览器完全没有 ResizeObserver」这条分支目前不可达，它是防御性守卫（让**我们自己的**代码不会抛，并保证预留保守）。**能被断言的回退路径**是 ②（无可用测量），已在 jsdom 下直接断言（见 §3）。
+
+### 1.3 实现要点
+
+- `useChatFooterInset(viewport, footer, reserveTodoBar)`：`ResizeObserver` 同时观测 footer 与 viewport（footer 变高、窗口缩放导致 pane 底边移动都会重算），回调里 `getBoundingClientRect` 取 inset 并 `Math.max(inset, 176)`，写入 `viewport.style.setProperty("--chat-footer-inset", ...)`。
+- footer / viewport 元素用 `useState` 承载（不是 `useRef`）：元素被替换时 effect 会重跑，两个元素都就位后立即生效。
+- `reserveTodoBar` 由父组件的 `visibleTodoTasks.length > 0` 提供；tombstone 过滤上移到 `ChatView`，`TodoStatusBar({ tasks })` 只负责渲染。**交互语义未变**：默认折叠、空/只有 tombstone/降级快照时不渲染、展开状态仍走 `panelOpenState`。
+- CSS：`.chat-viewport` 保留原 `padding` 简写（176px 作为文档化的旧值），下一行覆盖 `padding-bottom: var(--chat-footer-inset, 176px)`——变量缺失（首帧）时仍用 176px。
+
+### 1.4 只能靠真实浏览器验证的部分
+
+- **实际遮挡像素、展开前后「最后一条消息与 composer 之间的留白」在真实布局下的数值**：`NOT RUN`。jsdom 不做布局（所有 rect / offsetHeight 为 0），本轮只能断言 CSS 变量与 CSS 规则，不能断言像素。开发者会另做 browser-use 测量。
+- 需要开发者确认的一点：`reserve = max(实测 inset, 176)` 在展开态会给出「恰好等于遮挡区」的预留；如果实测发现展开态希望保留和折叠态一样的视觉留白，只需把下界（或一个附加常量）调大——这是常量调整，不是结构问题。
+
+## 2. F2：用未使用的字段把关有用的字段（P3）
+
+- `isTodoDetails()` 不再要求 `nextId`：只要 `tasks` 是数组就认。`nextId` 允许缺失 / 非数字。
+- 类型只做放宽：`ChatTodosSnapshot.nextId` 由必填 `number` 改为可选 `number`（纯放宽，无既有字段语义变化）；`TodoDetails.nextId` 由 `number` 改为可选 `unknown`。
+- **不造数字**：非数字的 `nextId` 直接**省略**，没有用 `-1` 之类的占位（Herzi 从不读它，编一个数是关于扩展的断言）；`buildTodoSnapshot` 的降级分支（超 128 KiB）同样只带上真实存在的 `nextId`。
+- 现有的 `nextId` 直通用例（真实数字 9 / 4001 等）继续通过，行为不回归。
+
+## 3. 可证伪验证（两次实测）
+
+同一份测试文件、同一命令，只换代码树（`/tmp/herzi-f1f2-prefix` = `git archive 6212c4b`，即本轮修复前的 HEAD）：
+
+### 3.1 F1 修复前失败 → 修复后通过
+
+```bash
+# 修复前
+npx vitest run src/web/components/ChatView.test.tsx -t "ChatView footer reservation"
+# Tests  5 failed | 46 skipped (51)
+#   × follows the space the fixed footer covers
+#   × never reserves less than the previous constant
+#   × reserves the conservative height while the footer reports no layout
+#   × keeps the base reservation when the todo bar renders nothing
+#   × keeps the stylesheet wired to the footer inset variable
+```
+
+关键原文（修复前根本没有这个 CSS 变量）：
+
+```
+FAIL … > follows the space the fixed footer covers
+AssertionError: expected '' to be '496px' // Object.is equality
+ ❯ src/web/components/ChatView.test.tsx:2005:30
+      expect(footerInsetVar()).toBe("496px");
+```
+
+```
+FAIL … > keeps the stylesheet wired to the footer inset variable
+AssertionError: expected '\n  width: 100%;\n  height: 100%;\n\n…'
+                to contain 'padding-bottom: var(--chat-footer-inset, 176px)'
+```
+
+修复后同一命令：`Tests 5 passed | 46 skipped (51)`。
+
+这 5 条分别钉住：①实测 inset 跟随（480px → 600px，且首帧用保守值 496px）；②下界 176px 不被突破（inset=20 时仍预留 176）；③无可用测量时按「基础 + 列表上限」保守预留（断言 ≥ 176+260，且条仍默认折叠）；④没有 todo 条（含只有 tombstone）时保持 176px；⑤样式表确实消费该变量（jsdom 不解析 `var()`，所以直接断言 `.chat-viewport` 规则文本，否则「组件写变量」与「布局用它」可以各错一半而无人发现）。
+
+### 3.2 F2 修复前失败 → 修复后通过
+
+```bash
+# 修复前
+npx vitest run src/server/pi-session-reader.test.ts -t "keeps a snapshot whose nextId"
+# Tests  1 failed | 21 skipped (22)
+```
+
+```
+FAIL … > keeps a snapshot whose nextId is missing or not a number
+AssertionError: missing: expected undefined to deeply equal [ { id: 1, subject: '任务', …(1) } ]
+ ❯ src/server/pi-session-reader.test.ts:696:43
+      expect(snapshot.todos?.tasks, name).toEqual([...]);
+```
+
+修复后：`Tests 1 passed`。该用例逐一覆盖 `nextId` 为 `undefined` / `"4"` / `null` 三种情况：都能产出快照、tasks 正确、`updatedAt` 正确、`truncated` 未置、且不造 `nextId`。
+
+诚实标注：同批新增的组件用例 `renders a snapshot that carries no nextId`（断言计数与展开列表正常渲染）**在修复前后都通过**——客户端本来就不读 `nextId`，所以它只能作为「客户端确实不依赖该字段」的回归护栏，不是 F2 的证伪证据；F2 真正被证伪的是服务端「快照被整份丢弃」那条路径。
+
+## 4. 验证结果（本轮修复后的 HEAD）
+
+| 项目 | 命令 | 结果 |
+| --- | --- | --- |
+| 目标测试（服务端） | `npx vitest run src/server/pi-session-reader.test.ts` | **PASS** 22/22 |
+| 目标测试（组件） | `npx vitest run src/web/components/ChatView.test.tsx` | **PASS** 51/51 |
+| 全量测试 | `npm test` | **PASS** 15 files / **164 tests**（上一轮 157，本轮 +7） |
+| 类型检查 | `npm run typecheck` | **PASS**（exit 0） |
+| 构建 | `npm run build` | **PASS**（仅既存 chunk 体积警告） |
+| 真实浏览器遮挡像素 / 视觉留白 | browser-use（开发者） | **NOT RUN** |
+| 真实 Pi session / 真实 Pane 验收 | — | **NOT RUN** |
+
+## 5. 本轮新增的未决限制
+
+1. **F1 的预留是「恰好等于遮挡区 + 176px 下界」**：展开态下没有额外的视觉留白（折叠态保留下界 176px，因此折叠态外观不变）。若真实浏览器测量后希望展开态也留白，调整常量即可。
+2. `assistant-ui` 无条件使用 `ResizeObserver`，因此「完全没有 ResizeObserver 的浏览器」目前无法渲染 ChatView；我们自己的「无观测」回退仍是保守的，且「无可用测量」路径已被断言（§1.2）。
+3. F3（超 128 KiB 整条不渲染）、F4（`at: 0` 共享展开状态）、F5（`role:createdAt` 去重键）、F6（客户端不限制 todo 行数）、F7（`promptCalls()` 断言脆弱）、F8（kept entry 非消息时分界顺延）、F9（turnActivity latch）本轮**未处理**：开发者只要求先处理 F1、F2，其余仍按 Reviewer 记录的降级/遗留登记，待开发者决定。
+
+## 6. 交接
+
+- 建议复验重点：`useChatFooterInset()` 的 inset 语义与 176px 下界、回退值（176 / 496）与「无可用测量」判据、`TodoStatusBar` 改为接收 `tasks` 后交互语义是否完全不变、`ChatTodosSnapshot.nextId` 放宽后是否仍无既有字段语义变化。
+- 本分支未 push；合入 `main` 需开发者逐批批准。

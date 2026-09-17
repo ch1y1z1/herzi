@@ -671,6 +671,40 @@ describe("PiSessionReader todo snapshots", () => {
     expect(snapshot.todos).toBeUndefined();
   });
 
+  it("keeps a snapshot whose nextId is missing or not a number", async () => {
+    // `nextId` is never rendered, so no shape of it may throw a good snapshot
+    // away (review finding F2).
+    const cases: Array<[string, Record<string, unknown>]> = [
+      ["missing", { action: "list", tasks: [{ id: 1, subject: "任务", status: "pending" }] }],
+      [
+        "string",
+        { action: "list", nextId: "4", tasks: [{ id: 1, subject: "任务", status: "pending" }] },
+      ],
+      [
+        "null",
+        { action: "list", nextId: null, tasks: [{ id: 1, subject: "任务", status: "pending" }] },
+      ],
+    ];
+
+    for (const [name, details] of cases) {
+      const sessionPath = await writeSession([
+        todoEntry("t1", null, "2026-09-15T00:00:00.000Z", details),
+      ]);
+
+      const snapshot = await new PiSessionReader().read("pane-1", sessionPath, false);
+
+      expect(snapshot.todos?.tasks, name).toEqual([
+        { id: 1, subject: "任务", status: "pending" },
+      ]);
+      expect(snapshot.todos?.updatedAt, name).toBe(
+        Date.parse("2026-09-15T00:00:00.000Z"),
+      );
+      expect(snapshot.todos?.truncated, name).toBeUndefined();
+      // An unverified id is dropped, never coerced into a number.
+      expect(snapshot.todos?.nextId, name).toBeUndefined();
+    }
+  });
+
   it("degrades to counts only when the snapshot exceeds its size budget", async () => {
     const sessionPath = await writeSession([
       todoEntry("t1", null, "2026-09-15T00:00:00.000Z", {
