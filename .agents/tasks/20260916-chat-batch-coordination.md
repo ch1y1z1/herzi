@@ -61,3 +61,12 @@
 - Reviewer agent：`herzi_reviewer`；只允许修改 `.agents/tasks/20260916-chat-reliability-review.md`，不得修改产品代码。
 - 已发送审查 prompt，并通过 `herdr agent get herzi_reviewer` 确认状态为 `working`。
 - Integrator 现在停止等待和轮询；Reviewer 完成后由用户手动通知。期间用户可直接与 Reviewer 交互，决策点由 Reviewer 直接向用户提问。
+
+## 独立 Review 结果（已收到）
+
+- Reviewer `herzi_reviewer` 已完成，findings commit `7f75693`（只修改 review 任务文件），worktree clean，未触碰产品代码。
+- 结论：未发现阻断问题；Medium ×3、Low ×8、Informational ×6。
+- Medium：F1 客户端 trace 在 flush 并发时滞留终态事件（已运行时复现）；F2 `queue.expired` 沿用过期前 status，且"认领后 ack 丢失"与"从未认领"在 UI 上不可区分并同样引导重试；F3 同 requestId 去重路径一律回 `queued`，终态命令会静默 no-op（latent）。
+- Reviewer 组合态验证：`npm ci` / `npm run typecheck` / `npm test`（11 files / 54 tests）/ `npm run build` 全 PASS；未发现 Worker A×B 交互回归。
+- 真实 Pi/Herdr 端到端与真实 HTTP/WS 行为为 `NOT RUN`（未运行 `npm run dev`）。
+- 处置：Wait —— Worker B commit `55839d5` 仍未进入 integration branch；等待开发者决定 F1/F2/F3 是退回 Worker B 修复，还是接受并在文档中记录为已知限制。
