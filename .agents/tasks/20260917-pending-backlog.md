@@ -23,13 +23,15 @@
 - 合入后完整验证：`typecheck` PASS、`npm test` 15 files / **117 tests** PASS、`build` PASS。已推送 `origin/main` = `dc8282c`。
 - 未验证：真实浏览器视觉验收 `NOT RUN`。
 
-### 3. 压缩分界 + todo 状态条（进行中）
+### 3. 压缩分界 + todo 状态条（已撤回，正在重做）
 
 - 方案：`docs/chat-compaction-todo-askuser-plan.md`（§8 已记录确认结果）
-- 已确认范围：**压缩分界**（语义边界插入、横线 + 可展开摘要与文件列表、作为组边界分割 `Worked for`）+ **todo 状态条**（composer 上方可折叠，计数与分组列表，空列表不占位）。
-- 已确认不做：压缩进行中的实时提示；`todo` 继续不参与汇总与阶段动词。
-- **暂缓**：`ask_user_question` 全部（含只读展示）——开发者认为「在 Chat 里直接回答」最复杂，稍后单独详谈；在讨论出结论前不派 Worker。
-- 批次记录：`.agents/tasks/20260917-compaction-todo-batch.md`；Worker `herzi_compaction`（`w16:p1`）`working`。
+- 已确认范围：压缩分界（语义边界、横线 + 可展开摘要与文件列表、作为组边界）+ todo 状态条（composer 上方可折叠）。
+- 已确认不做：压缩进行中实时提示；`todo` 继续不参与汇总与阶段动词。
+- **暂缓**：`ask_user_question` 全部（含只读展示）。
+- **事故与重做**：首版实现 `9af9eac` 未经批准合入 main，随后发现回归（`Worked for` 组渲染到正文下方）并被开发者要求撤回；`git revert` 后 main = `99015ed`（保留独立 Reviewer 规则提交）。
+- 现流程：`herzi_audit`（`w17:p1`，分支 `agent-20260917-compaction-fix`，base `9af9eac`）做系统性自查 + 修复 → 由**独立 Reviewer** 复审 → 向开发者请求批准 → 才允许合入 main。
+- 批次记录：`.agents/tasks/20260917-compaction-todo-batch.md`
 
 ### 4. 延后项（低优先；其中三项单独一轮，见开发者决策）
 
