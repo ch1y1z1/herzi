@@ -71,6 +71,33 @@ export interface ChatToolResultPayload {
   images: ChatToolResultImage[];
 }
 
+/**
+ * Which kind of context boundary a `divider` part marks.
+ *
+ * - `compaction`: Pi replaced older history with a generated summary.
+ * - `branch-summary`: Pi summarized an abandoned branch before continuing.
+ */
+export type ChatDividerKind = "compaction" | "branch-summary";
+
+/**
+ * A context boundary in the transcript.
+ *
+ * It is a pure marker: it hides nothing (the summarized history stays in the
+ * transcript) and it renders as a labelled rule between the parts it splits.
+ * `at` is the timestamp of the Pi entry that produced it, i.e. when the
+ * boundary was written, which is not necessarily the time of the messages next
+ * to it (see `convertActiveBranch`).
+ */
+export interface ChatDividerPart {
+  type: "divider";
+  kind: ChatDividerKind;
+  summary: string;
+  tokensBefore?: number;
+  modifiedFiles?: string[];
+  readFiles?: string[];
+  at: number;
+}
+
 export type ChatPart =
   | { type: "text"; text: string }
   | {
@@ -99,7 +126,8 @@ export type ChatPart =
       args: ChatJsonObject;
       result?: unknown;
       isError?: boolean;
-    };
+    }
+  | ChatDividerPart;
 
 export type ChatJsonValue =
   | string
@@ -133,6 +161,57 @@ export interface ChatSnapshot {
   running: boolean;
   updatedAt: number;
   messages: ChatMessage[];
+  /** Last `todo` tool snapshot on the active branch; absent until it is used. */
+  todos?: ChatTodosSnapshot;
+}
+
+/**
+ * Status of one `todo` task. Only these four values were observed in real
+ * sessions; the open string keeps unknown future values renderable instead of
+ * dropping the task.
+ */
+export type TodoTaskStatus =
+  | "pending"
+  | "in_progress"
+  | "completed"
+  | "deleted"
+  | string;
+
+/**
+ * One task from the `todo` extension's snapshot. Only fields verified against
+ * real session data are declared; everything else is dropped in the reader
+ * rather than re-serialized into the snapshot.
+ */
+export interface TodoTask {
+  id: number;
+  subject: string;
+  status: TodoTaskStatus;
+  /** Present participle shown while the task is in progress. */
+  activeForm?: string;
+  description?: string;
+  blockedBy?: number[];
+}
+
+/**
+ * Last-write-wins projection of the `todo` tool state (the extension returns
+ * the complete state on every successful call), plus the entry timestamp it was
+ * read from.
+ */
+export interface ChatTodosSnapshot {
+  tasks: TodoTask[];
+  /**
+   * Next task id the extension reported. Optional and never rendered: it is kept
+   * only when the extension really reported a number, so a snapshot stays usable
+   * when the field is missing instead of being dropped for it.
+   */
+  nextId?: number;
+  /** Entry timestamp of the tool result this snapshot was read from. */
+  updatedAt: number;
+  /**
+   * True when the projected snapshot exceeded the size budget and `tasks` was
+   * dropped; the client then shows nothing rather than a partial list.
+   */
+  truncated?: boolean;
 }
 
 export type ChatRealtimeStatus = "idle" | "working" | "waiting";
