@@ -165,3 +165,19 @@ HERZI_PORT=3041 npm start        # 生产模式：同一进程既服务 dist/web
 **测量内容**：滚动到底后比较最后一条消息的 `getBoundingClientRect().bottom` 与 `.chat-footer` 的 `top`，得出被压住的像素数；至少覆盖两个窗口尺寸与 todo 条的折叠/展开两态。
 
 **边界与风险（如实记录）**：候选服务连接的是同一个本机 Herdr socket，因此会列出真实 workspace/pane 列表（只读、不做 mutation）；该测量是单来源证据（Integrator 本人），Reviewer 无法在无授权运行时下复测，只会核对代码路径与可测试性。
+
+## F1/F2 修复与浏览器测量受阻（2026-09-17）
+
+**F1/F2 修复交付**：`herzi_audit`（`w17`）→ `c4dd3ed`（修复）+ `8fe5b3f`（记录）。
+- F1：`.chat-viewport` 的 `padding-bottom` 改为 `var(--chat-footer-inset, 176px)`；新增 `useChatFooterInset()` 用 ResizeObserver 观测 footer/viewport 实际占用，写回该 CSS 变量；**无 ResizeObserver 或量不到高度时**回退为「176px」或「176 + 320px（存在 todo 条时）」，方向只会更保守（不会比原来更少）。`reserveTodoBar` 取「可见 todo 任务数 > 0」。
+- F2：`isTodoDetails` 放宽为只要 `tasks` 是数组即产出快照，`nextId` 允许缺失/非数字；`protocol.ts` 只做放宽/新增。
+- 改动文件：`pi-session-reader.test.ts`、`protocol.ts`、`todo-tasks.ts`、`ChatView.tsx`、`ChatView.test.tsx`、`styles.css`、任务记录 —— 未越界。
+
+**评审候选已更新**：`review-20260917-compaction-fix`（`w18`）合入上述修复 → `2c546ee`；候选 `src/` 与修复分支一致。
+候选态验证（Integrator 实测）：`npm run typecheck` PASS；`npm test` PASS（15 files / **164 tests**）；`npm run build` PASS。
+
+**浏览器测量受阻（NOT RUN，待开发者决定路线）**：
+- 候选生产服务已跑在 **3041**（`HERZI_PORT=3041 npm start`，pid 9567，`GET /` → 200，`/api/health` → herdrConnected:true）；开发者的 3030 仍为 dev 模式（`GET /` → 302）。
+- `browser-use` 连接失败：`DevToolsActivePort not found ... enable chrome://inspect/#remote-debugging, or set BU_CDP_WS`。`browser-use --doctor` 显示 `[ok] chrome running` 但 `[FAIL] daemon alive / active browser connections`。
+- 按官方流程尝试「原命令挂起 + 另开 `mac-approve`」失败：`mac-approve` 返回 `not-found: retry the browser command and run browser-harness mac-approve when the prompt appears`；随后我按确切 PID 清理了自己启动的 `browser-use` 与其 daemon，未留残留进程。
+- 结论：需要开发者在本机 Chrome 侧开启远程调试（或由我另起一个隔离 profile 的调试 Chrome），否则 F1 的真实遮挡只能停留在**静态 CSS 推断**。
