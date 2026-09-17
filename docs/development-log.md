@@ -632,3 +632,32 @@ npm start
 - `npm run build`：PASS，仅保留既有 chunk size warning。
 - 未操作任何真实 Pi/Herdr Pane；真实 bridge claim/ack/expiry 在 UI 上的显示为 **NOT RUN**。
 - `src/web/styles.css` 本轮未改动（属并行 Worker 范围），投递状态按钮暂用内联样式。
+
+## 2026-09-16（第二轮）：Prompt 投递 review findings 修复
+
+来源：独立 Reviewer commit `7f75693` 的 findings（结论“未发现阻断问题”），开发者确认按方案 A 处置：F1/F2/F5 必修、F3 只写文档、其余延后。
+
+### 已修
+
+- **F1（Medium）客户端 trace 在 flush 并发时滞留终态事件**：`src/web/promptDeliveryTrace.ts` 的 flush 由“单次发送”改为持续 drain 直到 `pending` 为空或失败；`finally` 中补安全网，避免 in-flight 期间记录的事件等到下一条无关事件才被上报；连续失败退避上限保留为 5 次。新增可控挂起 Promise 的回归测试（修复前实测 FAIL）。
+- **F2（Medium）`queue.expired` 语义与 UI**：
+  - 服务端 `PromptQueueStatus` 增加 `"expired"`；两类过期分别写 `queue-expired-unclaimed`（从未被 claim，未投递）与 `queue-expired-unacked`（claim 后 ack 丢失，可能已投递），`status` 统一为 `delivery-unconfirmed`，不再沿用过期前的 `queued`/`claimed`。
+  - `queueLifecycleEvent` / `queueStatusToDeliveryStatus` 从 `src/server/index.ts` 移到 `src/server/pi-command-queue.ts` 并导出，使事件形状与映射可被单元测试覆盖（唯一的重构，未新增 HTTP 接口）。
+  - 客户端新增 `unacked` 状态“回执丢失（可能已送达）”：`重试…` 需二次确认（`确认重复发送`/`取消`），并提示先查看 Terminal；`client.delivery-status` trace 改用 UI 实际状态，不再出现 trace 记 `claimed`、界面显示未确认送达的矛盾。
+- **F5（Low）rotate 失败仍清零 fileBytes**：`rotate()` 仅在 `rename` 成功时重置计数；失败时调用 `onWriteError` 并降级为截断，2 MiB 上限不再静默失效。新增“旋转目标为非空目录”的回归测试（修复前实测 FAIL）。
+
+### 已写入文档
+
+- **F3（Medium，latent contract）**：同 `requestId` 在 60s TTL 内二次 POST 命中终态命令时仍回 `status:"queued"`，客户端可能永远等不到终态。当前 UI 不可达（每次尝试均新 UUID），修复涉及公开 HTTP 语义与“重试是否复用旧 id”的产品决策，故作为明确 contract 限制写入 `docs/prompt-delivery-observability.md` §9。
+
+### 延后（本轮不实现）
+
+F4、F6、F7、F8、F9（路由/dedupe 测试部分）、F10、F11 与 I1–I6 由开发者决定延后，逐条状态见 `.agents/tasks/20260916-prompt-delivery-observability.md` 的“Review 处置”一节。I4 中重复的 `deliveryTraceStatusForQueue` 映射已删除。
+
+### 验证
+
+- `npm run typecheck`：PASS。
+- `npm test`：PASS（10 files / 53 tests；首轮为 47）。
+- `npm run build`：PASS（仅既有 chunk size warning）。
+- 两条回归测试（F1、F5）在修复前实测 FAIL、修复后 PASS。
+- 真实 Pi/Herdr Pane 验收仍为 **NOT RUN**。

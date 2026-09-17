@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -133,6 +133,33 @@ describe("PromptDeliveryTrace", () => {
 
     expect((await stat(filePath)).size).toBeLessThanOrEqual(300);
     expect((await stat(`${filePath}.1`)).size).toBeLessThanOrEqual(300);
+    trace.stop();
+  });
+
+  it("keeps the size cap when rotation fails instead of resetting the counter", async () => {
+    const filePath = await tempTracePath();
+    await writeFile(filePath, "x".repeat(800), "utf8");
+    // A non-empty directory in the rotation target makes rename fail (EISDIR),
+    // which is the case where a naive counter reset silently disables the cap.
+    const blockedTarget = `${filePath}.1`;
+    await mkdir(blockedTarget, { recursive: true });
+    await writeFile(path.join(blockedTarget, "keep"), "x", "utf8");
+
+    const errors: unknown[] = [];
+    const trace = new PromptDeliveryTrace({
+      filePath,
+      maxFileBytes: 400,
+      onWriteError: (error) => errors.push(error),
+    });
+
+    for (let index = 0; index < 40; index += 1) {
+      trace.record(serverEvent({ requestId: `request-${index}` }));
+    }
+    await trace.flush();
+
+    // The failure is diagnosable and the file no longer grows without bound.
+    expect(errors.length).toBeGreaterThan(0);
+    expect((await stat(filePath)).size).toBeLessThan(800);
     trace.stop();
   });
 

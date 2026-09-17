@@ -56,7 +56,6 @@ import type {
   PaneSummary,
   PromptDeliveryEvent,
   PromptDeliveryStatus,
-  PromptQueueStatus,
   PromptTransport,
 } from "../../shared/protocol";
 
@@ -96,6 +95,7 @@ type PendingDeliveryState =
   | "claimed"
   | "sent"
   | "unconfirmed"
+  | "unacked"
   | "failed";
 
 interface PendingDelivery {
@@ -132,6 +132,13 @@ interface DeliveryPartData {
 
 interface PromptDeliveryActionsState {
   retry: (messageId: string) => void;
+  /**
+   * Two-step retry for states where the prompt may already have reached Pi.
+   * A single click must not look like a safe resend.
+   */
+  requestRetryConfirmation: (messageId: string) => void;
+  cancelRetryConfirmation: () => void;
+  confirmingMessageId: string | null;
   copy: (messageId: string) => void;
   copiedMessageId: string | null;
 }
@@ -153,6 +160,7 @@ function deliveryTraceStatus(state: PendingDeliveryState): PromptDeliveryStatus 
     case "sent":
       return "submitted";
     case "unconfirmed":
+    case "unacked":
       return "delivery-unconfirmed";
     case "failed":
       return "failed";
@@ -161,23 +169,10 @@ function deliveryTraceStatus(state: PendingDeliveryState): PromptDeliveryStatus 
   }
 }
 
-function deliveryTraceStatusForQueue(status: PromptQueueStatus): PromptDeliveryStatus {
-  switch (status) {
-    case "queued":
-      return "queued";
-    case "claimed":
-      return "claimed";
-    case "dispatched":
-      return "dispatched";
-    default:
-      return "failed";
-  }
-}
-
-function pendingStateForQueuePhase(
-  phase: PromptDeliveryEvent["phase"],
+function pendingStateForQueueEvent(
+  event: PromptDeliveryEvent,
 ): PendingDeliveryState | null {
-  switch (phase) {
+  switch (event.phase) {
     case "queue.claimed":
       return "claimed";
     case "queue.dispatched":
@@ -185,7 +180,10 @@ function pendingStateForQueuePhase(
     case "queue.failed":
       return "failed";
     case "queue.expired":
-      return "unconfirmed";
+      // An unacknowledged claim means Pi very likely already received the
+      // prompt and only the receipt was lost; an unclaimed command never
+      // reached Pi at all. The two need different guidance.
+      return event.errorCode === "queue-expired-unacked" ? "unacked" : "unconfirmed";
     default:
       return null;
   }
@@ -197,7 +195,14 @@ const DELIVERY_LABELS: Record<PendingDeliveryState, string> = {
   claimed: "Pi 已接收，正在写入会话…",
   sent: "已送达",
   unconfirmed: "未确认送达",
+  unacked: "回执丢失（可能已送达）",
   failed: "未送达",
+};
+
+const DELIVERY_HINTS: Partial<Record<PendingDeliveryState, string>> = {
+  unconfirmed: "Pi 没有认领这条命令，它很可能没有进入会话。",
+  unacked: "Pi 可能已经收到并写入了这条消息，只是回执没有到达 Herzi；建议先查看 Terminal 或会话内容再决定是否重试。",
+  failed: "Pi bridge 报告投递失败，这条消息没有进入会话。",
 };
 
 function shortRequestId(requestId: string): string {
@@ -234,6 +239,12 @@ export function ChatView({
     { message: string; requestId: string } | null
   >(null);
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
+  /**
+   * Message id whose "maybe already delivered" resend still needs an explicit
+   * second confirmation. A one-click retry would look safe while silently
+   * duplicating the prompt.
+   */
+  const [confirmingRetryId, setConfirmingRetryId] = useState<string | null>(null);
   const [lastTransport, setLastTransport] = useState<"host-path" | "pi-native" | null>(null);
   const acknowledgedDoneRef = useRef(false);
   const reconciledRef = useRef(new Set<string>());
@@ -255,6 +266,7 @@ export function ChatView({
     setError("");
     setDeliveryError(null);
     setCopiedMessageId(null);
+    setConfirmingRetryId(null);
     setLastTransport(null);
     reconciledRef.current = new Set();
     appliedDeliveryEventsRef.current = new Set();
@@ -402,15 +414,19 @@ export function ChatView({
         appliedDeliveryEventsRef.current = new Set([key]);
       }
 
-      const nextState = pendingStateForQueuePhase(event.phase);
+      const nextState = pendingStateForQueueEvent(event);
       if (!nextState) continue;
 
       createPromptDeliveryTrace({
         paneId: pane.id,
         requestId: event.requestId,
       }).record("client.delivery-status", {
-        status: event.status ?? deliveryTraceStatusForQueue(event.queueStatus ?? "queued"),
+        // Always the status the user actually sees, never the raw queue status:
+        // an expired claim must not be traced as `claimed` while the UI says
+        // "delivery unconfirmed".
+        status: deliveryTraceStatus(nextState),
         ...(event.queueStatus ? { queueStatus: event.queueStatus } : {}),
+        ...(event.errorCode ? { errorCode: event.errorCode } : {}),
         ...(event.transport ? { transport: event.transport } : {}),
         ...(event.latencyMs !== undefined ? { latencyMs: event.latencyMs } : {}),
       });
@@ -424,19 +440,14 @@ export function ChatView({
                   ...item.delivery,
                   state: nextState,
                   updatedAt: Date.now(),
-                  ...(nextState === "failed"
-                    ? { error: "Pi bridge 报告投递失败，这条消息没有进入会话" }
-                    : {}),
-                  ...(nextState === "unconfirmed"
-                    ? { error: "未收到 Pi 的投递回执，会话中可能没有这条消息" }
-                    : {}),
+                  ...(DELIVERY_HINTS[nextState] ? { error: DELIVERY_HINTS[nextState] } : {}),
                 },
               }
             : item,
         ),
       );
 
-      if (nextState === "failed" || nextState === "unconfirmed") {
+      if (DELIVERY_HINTS[nextState]) {
         setDeliveryError({
           message: `${DELIVERY_LABELS[nextState]}：requestId ${shortRequestId(event.requestId)}`,
           requestId: event.requestId,
@@ -653,6 +664,7 @@ export function ChatView({
         updatedAt: Date.now(),
       });
       setDeliveryError(null);
+      setConfirmingRetryId(null);
 
       await deliverPrompt({
         messageId,
@@ -692,10 +704,13 @@ export function ChatView({
   const deliveryActions = useMemo<PromptDeliveryActionsState>(
     () => ({
       retry: (messageId) => void retryPendingMessage(messageId),
+      requestRetryConfirmation: (messageId) => setConfirmingRetryId(messageId),
+      cancelRetryConfirmation: () => setConfirmingRetryId(null),
+      confirmingMessageId: confirmingRetryId,
       copy: (messageId) => void copyPendingMessage(messageId),
       copiedMessageId,
     }),
-    [copiedMessageId, copyPendingMessage, retryPendingMessage],
+    [confirmingRetryId, copiedMessageId, copyPendingMessage, retryPendingMessage],
   );
 
 
@@ -840,6 +855,8 @@ function UserDeliveryStatus({ data }: DataMessagePartProps<DeliveryPartData>) {
   const actions = useContext(PromptDeliveryActionsContext);
   const info = data as DeliveryPartData;
   const actionable = info.state === "failed" || info.state === "unconfirmed";
+  const maybeDelivered = info.state === "unacked";
+  const confirming = maybeDelivered && actions?.confirmingMessageId === info.messageId;
   const imageHint = deliveryImageHint(info);
 
   return (
@@ -847,7 +864,9 @@ function UserDeliveryStatus({ data }: DataMessagePartProps<DeliveryPartData>) {
       <span className="user-delivery-line">
         {info.state === "sending" ? (
           <LoaderCircle className="spin" size={12} aria-hidden="true" />
-        ) : info.state === "failed" || info.state === "unconfirmed" ? (
+        ) : info.state === "failed" ||
+          info.state === "unconfirmed" ||
+          info.state === "unacked" ? (
           <CircleAlert size={12} aria-hidden="true" />
         ) : (
           <Clock3 size={12} aria-hidden="true" />
@@ -860,7 +879,7 @@ function UserDeliveryStatus({ data }: DataMessagePartProps<DeliveryPartData>) {
       </span>
       {info.error && <span className="user-delivery-error">{info.error}</span>}
       {imageHint && <span className="user-delivery-hint">{imageHint}</span>}
-      {actionable && actions && (
+      {actions && actionable && (
         <span className="user-delivery-actions">
           <button
             type="button"
@@ -878,6 +897,49 @@ function UserDeliveryStatus({ data }: DataMessagePartProps<DeliveryPartData>) {
             <Copy size={11} aria-hidden="true" />
             {actions.copiedMessageId === info.messageId ? "已复制" : "复制内容"}
           </button>
+        </span>
+      )}
+      {actions && maybeDelivered && (
+        <span className="user-delivery-actions">
+          {confirming ? (
+            <>
+              <span className="user-delivery-warning">重试会重复发送这条消息</span>
+              <button
+                type="button"
+                style={deliveryActionButtonStyle}
+                onClick={() => actions.retry(info.messageId)}
+              >
+                <RefreshCw size={11} aria-hidden="true" />
+                确认重复发送
+              </button>
+              <button
+                type="button"
+                style={deliveryActionButtonStyle}
+                onClick={() => actions.cancelRetryConfirmation()}
+              >
+                取消
+              </button>
+            </>
+          ) : (
+            <>
+              <button
+                type="button"
+                style={deliveryActionButtonStyle}
+                onClick={() => actions.requestRetryConfirmation(info.messageId)}
+              >
+                <RefreshCw size={11} aria-hidden="true" />
+                重试…
+              </button>
+              <button
+                type="button"
+                style={deliveryActionButtonStyle}
+                onClick={() => actions.copy(info.messageId)}
+              >
+                <Copy size={11} aria-hidden="true" />
+                {actions.copiedMessageId === info.messageId ? "已复制" : "复制内容"}
+              </button>
+            </>
+          )}
         </span>
       )}
     </div>

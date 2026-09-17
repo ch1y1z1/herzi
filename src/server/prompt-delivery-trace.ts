@@ -1,4 +1,4 @@
-import { appendFile, mkdir, rename, stat } from "node:fs/promises";
+import { appendFile, mkdir, rename, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -169,7 +169,11 @@ export class PromptDeliveryTrace {
     } catch {
       this.fileBytes = 0;
     }
-    if (this.fileBytes > this.maxFileBytes) await this.rotate();
+    if (this.fileBytes > this.maxFileBytes) {
+      // A failed rotation is already reported through onWriteError; startup must
+      // still succeed so prompt delivery is never blocked by tracing.
+      await this.rotate().catch(() => undefined);
+    }
   }
 
   private async writeLine(line: string): Promise<void> {
@@ -180,8 +184,17 @@ export class PromptDeliveryTrace {
   }
 
   private async rotate(): Promise<void> {
-    await rename(this.filePath, `${this.filePath}.1`).catch(() => undefined);
-    this.fileBytes = 0;
+    try {
+      await rename(this.filePath, `${this.filePath}.1`);
+      this.fileBytes = 0;
+    } catch (error) {
+      // Renaming can fail (for example when `<file>.1` exists and cannot be
+      // replaced). Truncating keeps the size accounting honest; resetting the
+      // counter without shrinking the file would silently disable the cap.
+      this.onWriteError?.(error);
+      await writeFile(this.filePath, "", { mode: 0o600 });
+      this.fileBytes = 0;
+    }
   }
 }
 

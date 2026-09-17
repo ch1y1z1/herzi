@@ -196,7 +196,12 @@ export type PromptDeliveryPhase =
 
 export type PromptDeliverySource = "client" | "server";
 
-export type PromptQueueStatus = "queued" | "claimed" | "dispatched" | "failed";
+export type PromptQueueStatus =
+  | "queued"
+  | "claimed"
+  | "dispatched"
+  | "failed"
+  | "expired";
 
 /**
  * One bounded, metadata-only prompt delivery trace event. Field values are

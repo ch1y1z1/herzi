@@ -127,4 +127,44 @@ describe("prompt delivery client trace", () => {
     await flushPromptDeliveryTrace();
     expect(postedEvents(mockedApiFetch.mock.calls.length - 1)).toHaveLength(1);
   });
+
+  it("drains events recorded while a flush request is still in flight", async () => {
+    vi.useFakeTimers();
+    try {
+      // A controllable hanging request reproduces the in-flight + timer race:
+      // the second event's flush timer fires while the first POST is pending.
+      const deferred: Array<(response: Response) => void> = [];
+      mockedApiFetch.mockImplementation(
+        () => new Promise<Response>((resolve) => deferred.push(resolve)),
+      );
+      const trace = createPromptDeliveryTrace({
+        paneId: "pane-1",
+        requestId: "request-1",
+      });
+
+      trace.record("client.submit");
+      // Above the 300ms batch delay and below the 3000ms failure retry.
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(mockedApiFetch).toHaveBeenCalledTimes(1);
+
+      trace.record("client.response", { httpStatus: 200, status: "submitted" });
+      // The timer fires while the first POST is still in flight.
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(mockedApiFetch).toHaveBeenCalledTimes(1);
+
+      deferred[0]?.(okResponse(1));
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      // Without a re-schedule the terminal event stays buffered until some
+      // unrelated event happens to arrive, so the server never sees it.
+      expect(mockedApiFetch).toHaveBeenCalledTimes(2);
+      expect(postedEvents(1)).toHaveLength(1);
+      expect(postedEvents(1)[0]).toMatchObject({ phase: "client.response" });
+
+      deferred[1]?.(okResponse(1));
+      await vi.advanceTimersByTimeAsync(1_000);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

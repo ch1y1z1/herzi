@@ -5,7 +5,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { PaneSummary, PromptDeliveryEvent } from "../../shared/protocol";
 import { apiFetch } from "../api";
-import { resetPromptDeliveryTrace } from "../promptDeliveryTrace";
+import {
+  flushPromptDeliveryTrace,
+  resetPromptDeliveryTrace,
+} from "../promptDeliveryTrace";
 import { ChatView } from "./ChatView";
 
 vi.mock("../api", () => ({ apiFetch: vi.fn() }));
@@ -28,6 +31,7 @@ const PROMPT_MESSAGE = "帮我看看这个报错";
 
 beforeEach(() => {
   resetPromptDeliveryTrace();
+  traceBatches = [];
   mockedApiFetch.mockReset();
   vi.stubGlobal(
     "ResizeObserver",
@@ -85,6 +89,22 @@ function promptCalls(): ApiFetchCall[] {
 function requestIdOf(call: ApiFetchCall): string {
   const body = JSON.parse(String(call[1]?.body ?? "{}")) as { requestId?: string };
   return body.requestId ?? "";
+}
+
+/** Uploaded client trace batches, flattened for assertions. */
+let traceBatches: PromptDeliveryEvent[][] = [];
+
+function traceEvents(): PromptDeliveryEvent[] {
+  return traceBatches.flat();
+}
+
+function collectTraceBatch(init: RequestInit | undefined): Response {
+  const body = JSON.parse(String(init?.body ?? "{}")) as {
+    events?: PromptDeliveryEvent[];
+  };
+  const events = body.events ?? [];
+  traceBatches.push(events);
+  return jsonResponse({ ok: true, accepted: events.length });
 }
 
 async function sendPrompt(): Promise<void> {
@@ -177,8 +197,10 @@ describe("ChatView prompt delivery visibility", () => {
       phase: "queue.expired",
       at: Date.now(),
       seq: 7,
-      queueStatus: "queued",
+      // The shape the server actually emits for a never-claimed command.
+      queueStatus: "expired",
       status: "delivery-unconfirmed",
+      errorCode: "queue-expired-unclaimed",
       latencyMs: 60_000,
     };
 
@@ -246,5 +268,133 @@ describe("ChatView prompt delivery visibility", () => {
     );
     expect(screen.queryByText("等待 Pi 接收…")).toBeNull();
     expect(screen.getByText(PROMPT_MESSAGE)).toBeTruthy();
+  });
+
+  it("requires an explicit confirmation before resending a claim whose receipt was lost", async () => {
+    mockedApiFetch.mockImplementation(async (url, init) => {
+      if (String(url) === "/api/prompt-delivery/events") {
+        return collectTraceBatch(init);
+      }
+      return jsonResponse({
+        ok: true,
+        requestId: "server-ignored",
+        transport: "pi-native",
+        status: "queued",
+      });
+    });
+
+    const { rerender } = render(<ChatView pane={pane} />);
+    await sendPrompt();
+    await waitFor(() => expect(screen.getByText("等待 Pi 接收…")).toBeTruthy());
+    const requestId = requestIdOf(promptCalls()[0]!);
+
+    rerender(
+      <ChatView
+        pane={pane}
+        deliveryEvents={[
+          {
+            requestId,
+            paneId: pane.id,
+            source: "server",
+            phase: "queue.expired",
+            at: Date.now(),
+            seq: 9,
+            queueStatus: "expired",
+            status: "delivery-unconfirmed",
+            errorCode: "queue-expired-unacked",
+            latencyMs: 60_200,
+          },
+        ]}
+      />,
+    );
+
+    await waitFor(() => expect(screen.getByText("回执丢失（可能已送达）")).toBeTruthy());
+    expect(screen.getByText(/建议先查看 Terminal/)).toBeTruthy();
+
+    // A single click must not silently duplicate the prompt.
+    fireEvent.click(screen.getByRole("button", { name: "重试…" }));
+    expect(promptCalls()).toHaveLength(1);
+    expect(screen.getByText("重试会重复发送这条消息")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "取消" }));
+    expect(screen.queryByText("重试会重复发送这条消息")).toBeNull();
+    expect(promptCalls()).toHaveLength(1);
+
+    fireEvent.click(screen.getByRole("button", { name: "重试…" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认重复发送" }));
+    await waitFor(() => expect(promptCalls()).toHaveLength(2));
+
+    // The traced client status has to match what the user actually saw: an
+    // expired claim must never be recorded as `claimed`.
+    await flushPromptDeliveryTrace();
+    const deliveryStatusEvents = traceEvents().filter(
+      (event) =>
+        event.phase === "client.delivery-status" && event.requestId === requestId,
+    );
+    expect(deliveryStatusEvents).toHaveLength(1);
+    expect(deliveryStatusEvents[0]).toMatchObject({
+      status: "delivery-unconfirmed",
+      queueStatus: "expired",
+      errorCode: "queue-expired-unacked",
+      source: "client",
+    });
+    expect(deliveryStatusEvents.some((event) => event.status === "claimed")).toBe(
+      false,
+    );
+  });
+
+  it("traces the same status it shows for a never-claimed expiry", async () => {
+    mockedApiFetch.mockImplementation(async (url, init) => {
+      if (String(url) === "/api/prompt-delivery/events") {
+        return collectTraceBatch(init);
+      }
+      return jsonResponse({
+        ok: true,
+        requestId: "server-ignored",
+        transport: "pi-native",
+        status: "queued",
+      });
+    });
+
+    const { rerender } = render(<ChatView pane={pane} />);
+    await sendPrompt();
+    await waitFor(() => expect(screen.getByText("等待 Pi 接收…")).toBeTruthy());
+    const requestId = requestIdOf(promptCalls()[0]!);
+
+    rerender(
+      <ChatView
+        pane={pane}
+        deliveryEvents={[
+          {
+            requestId,
+            paneId: pane.id,
+            source: "server",
+            phase: "queue.expired",
+            at: Date.now(),
+            seq: 11,
+            queueStatus: "expired",
+            status: "delivery-unconfirmed",
+            errorCode: "queue-expired-unclaimed",
+            latencyMs: 60_000,
+          },
+        ]}
+      />,
+    );
+
+    await waitFor(() => expect(screen.getByText("未确认送达")).toBeTruthy());
+    expect(screen.getByRole("button", { name: "重试" })).toBeTruthy();
+
+    await flushPromptDeliveryTrace();
+    expect(
+      traceEvents().find(
+        (event) =>
+          event.phase === "client.delivery-status" &&
+          event.requestId === requestId,
+      ),
+    ).toMatchObject({
+      status: "delivery-unconfirmed",
+      queueStatus: "expired",
+      errorCode: "queue-expired-unclaimed",
+    });
   });
 });

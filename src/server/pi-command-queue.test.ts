@@ -3,6 +3,8 @@ import { describe, expect, it, vi } from "vitest";
 import {
   PiCommandQueue,
   parseBridgeIdentity,
+  queueLifecycleEvent,
+  queueStatusToDeliveryStatus,
   type PiCommandLifecycleEvent,
 } from "./pi-command-queue.js";
 
@@ -158,14 +160,14 @@ describe("PiCommandQueue lifecycle tracing", () => {
     queue.stop();
   });
 
-  it("expires commands that are never claimed or never acknowledged", async () => {
+  it("expires commands that are never claimed with an explicit unclaimed code", async () => {
     vi.useFakeTimers();
     try {
       const lifecycle: PiCommandLifecycleEvent[] = [];
       const queue = new PiCommandQueue((event) => lifecycle.push(event));
       queue.touch({ ...identity, sessionPath: "/session/other.jsonl" });
 
-      queue.enqueue({
+      const command = queue.enqueue({
         paneId: identity.paneId,
         sessionPath: "/session/other.jsonl",
         requestId: "request-queued",
@@ -181,12 +183,83 @@ describe("PiCommandQueue lifecycle tracing", () => {
       ]);
       expect(lifecycle.at(-1)).toMatchObject({
         requestId: "request-queued",
-        queueStatus: "queued",
+        commandId: command.id,
+        // The pre-expiry status must not be reused; the cause lives in errorCode.
+        queueStatus: "expired",
+        errorCode: "queue-expired-unclaimed",
         latencyMs: 61_000,
       });
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("expires a claimed but never acknowledged command as unacked", async () => {
+    vi.useFakeTimers();
+    try {
+      const lifecycle: PiCommandLifecycleEvent[] = [];
+      const queue = new PiCommandQueue((event) => lifecycle.push(event));
+      queue.touch(identity);
+
+      const command = queue.enqueue({
+        paneId: identity.paneId,
+        sessionPath: identity.sessionPath,
+        requestId: "request-claimed",
+        text: "review",
+        images: [image],
+      });
+      expect((await queue.poll(identity))?.id).toBe(command.id);
+      vi.advanceTimersByTime(61_000);
+      queue.cleanup();
+
+      expect(lifecycle.map((event) => event.phase)).toEqual([
+        "queue.enqueued",
+        "queue.claimed",
+        "queue.expired",
+      ]);
+      expect(lifecycle.at(-1)).toMatchObject({
+        queueStatus: "expired",
+        errorCode: "queue-expired-unacked",
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("maps queue lifecycle events to non-misleading trace events", () => {
+    expect(
+      queueStatusToDeliveryStatus("expired"),
+    ).toBe("delivery-unconfirmed");
+    expect(queueStatusToDeliveryStatus("claimed")).toBe("claimed");
+    expect(queueStatusToDeliveryStatus("dispatched")).toBe("dispatched");
+    expect(queueStatusToDeliveryStatus("failed")).toBe("failed");
+    expect(queueStatusToDeliveryStatus("queued")).toBe("queued");
+
+    expect(
+      queueLifecycleEvent(
+        {
+          phase: "queue.expired",
+          requestId: "request-1",
+          paneId: "w1:p1",
+          commandId: "command-1",
+          latencyMs: 60_100,
+          queueStatus: "expired",
+          errorCode: "queue-expired-unacked",
+        },
+        1_760_000_000_000,
+      ),
+    ).toEqual({
+      requestId: "request-1",
+      paneId: "w1:p1",
+      source: "server",
+      phase: "queue.expired",
+      at: 1_760_000_000_000,
+      latencyMs: 60_100,
+      queueStatus: "expired",
+      status: "delivery-unconfirmed",
+      commandId: "command-1",
+      errorCode: "queue-expired-unacked",
+    });
   });
 
   it("ignores a lifecycle observer that throws", () => {

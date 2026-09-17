@@ -15,7 +15,6 @@ import type {
   PromptDeliveryEvent,
   PromptDeliveryPhase,
   PromptDeliveryStatus,
-  PromptQueueStatus,
   PromptResponse,
   ServerMessage,
 } from "../shared/protocol.js";
@@ -29,7 +28,7 @@ import { appendManagedAttachments } from "./managed-attachments.js";
 import {
   PiCommandQueue,
   parseBridgeIdentity,
-  type PiCommandLifecycleEvent,
+  queueLifecycleEvent,
 } from "./pi-command-queue.js";
 import { PiRealtimeStore, parsePiBridgeBatch } from "./pi-realtime.js";
 import { PiSessionReader } from "./pi-session-reader.js";
@@ -903,34 +902,6 @@ function bridgeIdentityMatches(identity: {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
-}
-
-function queueLifecycleEvent(event: PiCommandLifecycleEvent): PromptDeliveryEvent {
-  return {
-    requestId: event.requestId,
-    paneId: event.paneId,
-    source: "server",
-    phase: event.phase,
-    at: Date.now(),
-    latencyMs: event.latencyMs,
-    queueStatus: event.queueStatus,
-    status: queueStatusToDeliveryStatus(event.queueStatus),
-    commandId: event.commandId,
-    ...(event.errorCode ? { errorCode: event.errorCode } : {}),
-  };
-}
-
-function queueStatusToDeliveryStatus(status: PromptQueueStatus): PromptDeliveryStatus {
-  switch (status) {
-    case "dispatched":
-      return "dispatched";
-    case "claimed":
-      return "claimed";
-    case "failed":
-      return "failed";
-    default:
-      return "queued";
-  }
 }
 
 interface PromptTraceFields {

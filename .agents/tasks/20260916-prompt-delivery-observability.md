@@ -1,9 +1,10 @@
 # Prompt 投递可观测性与无声丢失保护（Worker B 执行记录）
 
-- 状态：实现完成，合成测试与构建 PASS；真实 Pi/Herdr Pane 写入式验收 NOT RUN，待用户授权。
-- 角色：本批次 Worker B。
+- 状态：首轮实现完成（commit `55839d5`），第二轮 Review 修复完成（F1/F2/F5 已修，F3 已写入文档，其余延后）；合成测试与构建 PASS；真实 Pi/Herdr Pane 写入式验收 NOT RUN，待用户授权。
+- 角色：本批次 Worker B（`herzi_delivery`）。
 - 范围：`src/web/components/ChatView.tsx`、新增窄范围 prompt delivery trace 模块、`src/server/index.ts`、`src/server/pi-command-queue.ts`、必要 shared type 与测试。经用户明确批准，额外最小改动 `src/web/App.tsx`（WS 消息转发）。
-- Base worktree：`/Users/chiyizi/.herdr/worktrees/herzi/agent-20260916-prompt-observability`，base SHA `dd8cbe983c9f30bc795bc95209ddbac490b4b889`。
+- Base worktree：`/Users/chiyizi/.herdr/worktrees/herzi/agent-20260916-prompt-observability`，branch `agent-20260916-prompt-observability`，base SHA `dd8cbe983c9f30bc795bc95209ddbac490b4b889`。
+- Commit：首轮 `55839d5`；第二轮 Review 修复见文末“交付”。
 - 长期文档：[`docs/prompt-delivery-observability.md`](../../docs/prompt-delivery-observability.md)。
 
 ## 目标与验收条件
@@ -59,8 +60,9 @@
 | 命令 | 结果 | 说明 |
 | --- | --- | --- |
 | `npm run typecheck` | PASS | `tsc --noEmit` 无输出 |
-| `npm test` | PASS | 10 files / 47 tests（新增 5 个测试文件，含 17 项新用例） |
+| `npm test` | PASS | 第二轮后 10 files / 53 tests（首轮为 10 files / 47 tests） |
 | `npm run build` | PASS | `dist/web` 产出正常，仅既有 >500 kB chunk warning |
+| `git diff --check` | PASS | 无空白错误 |
 
 测试覆盖的关键不变量：
 
@@ -70,6 +72,14 @@
 - 客户端批量上报、未知字段剔除、批次有界、server 不可用时不丢缓冲；
 - ChatView：失败气泡保留 + alert + 重试/复制、不会自动重发、手动重试用新 requestId、queued→expired 显示未确认、claimed→dispatched 后状态行消失。
 
+第二轮新增的不变量：
+
+- `promptDeliveryTrace` 在 POST 在途期间记录的事件会被继续 drain（回归测试在修复前实测 FAIL）；
+- `queue.expired` 的事件形状两类可区分（`queueStatus: "expired"` + `queue-expired-unclaimed` / `queue-expired-unacked`），且 `status` 不再沿用过期前状态；
+- ChatView 的 `client.delivery-status` trace 状态与界面显示一致（过期时记 `delivery-unconfirmed`，不再记 `claimed`）；
+- “认领后未 ack”需要二次确认才能重发，单击“重试…”不会触发请求；
+- `rotate()` 失败时不再静默清零 `fileBytes`，上限保持有效且 `onWriteError` 可诊断（回归测试在修复前实测 FAIL）。
+
 NOT RUN：真实 Pi bridge claim/ack/expiry 在浏览器中的显示、真实 Herdr prompt 失败路径、`GET /api/prompt-delivery` 的真实数据核对。均需要用户授权的专用 synthetic Pane。
 
 ## 未决问题与风险
@@ -78,3 +88,50 @@ NOT RUN：真实 Pi bridge claim/ack/expiry 在浏览器中的显示、真实 He
 2. `GET /api/prompt-delivery` 与既有 GET 一致未要求 request token；只监听 loopback 且不含正文，但是否要收紧为需要 token 未决定。
 3. `host-path` / `text` 路径只有 `server.submitted`（Herdr 已接收），没有像 queue 那样的最终 ack；Pi 未落盘时仍无法判定“未确认”，需要日志证据后再决定是否扩展。
 4. 投递状态按钮使用内联样式，等 `styles.css` 的并行改动集成后应统一为类名。
+
+## Review 处置（第二轮，Reviewer commit `7f75693`）
+
+Reviewer 结论为“未发现阻断问题”。开发者确认按方案 A 处置：F1/F2/F5 必须修，F3 只写文档，其余延后。
+
+### 已修复
+
+| 编号 | severity | 处置 | 验证 |
+| --- | --- | --- | --- |
+| F1 | Medium | `src/web/promptDeliveryTrace.ts` 的 flush 改为持续 drain 直到 `pending` 为空或失败；`finally` 中补安全网（`pending` 非空且无 retry/flush timer 时补排程），并保留“连续 5 次失败后停止自动重试”的退避上限。新增可控挂起 Promise 的回归测试。 | PASS，回归测试修复前实测 FAIL（1 次 POST 而非 2 次） |
+| F2 | Medium | 服务端：`PromptQueueStatus` 新增 `"expired"`，两类过期写不同 `errorCode`（`queue-expired-unclaimed` / `queue-expired-unacked`），`status` 统一为 `delivery-unconfirmed`，不再沿用过期前状态；把 `queueLifecycleEvent` / `queueStatusToDeliveryStatus` 从 `index.ts` 移到 `pi-command-queue.ts` 以使其可测。客户端：新增 `unacked` UI 状态（“回执丢失（可能已送达）”），`client.delivery-status` trace 改用 UI 实际状态（不再记 `claimed`）；`unacked` 的重试需要二次确认（`重试…` → `确认重复发送` / `取消`）并提示先查看 Terminal。 | PASS，服务端事件形状、状态映射、UI 两态、trace 一致性均有测试 |
+| F5 | Low | `rotate()` 仅在 `rename` 成功时重置 `fileBytes`；失败时调用 `onWriteError` 并降级为截断，`prepareFile` 不让启动失败。新增“旋转目标为目录”的回归测试。 | PASS，回归测试修复前实测 FAIL（errors=0） |
+
+### 已写入文档（不重构）
+
+| 编号 | severity | 处置 |
+| --- | --- | --- |
+| F3 | Medium（latent contract） | 作为明确 API contract 限制写入 [`docs/prompt-delivery-observability.md`](../../docs/prompt-delivery-observability.md) §9：同 `requestId` 在 60s TTL 内二次 POST 命中终态命令时仍回 `status:"queued"`，客户端可能永远等不到终态；触发条件、当前 UI 不可达（每次尝试均新 UUID）、为何暂不修（属公开 HTTP 语义变更 + 引出“重试用旧 id”的产品决策）已逐条说明。 |
+
+### 延后（本轮不实现）
+
+| 编号 | severity | 状态 |
+| --- | --- | --- |
+| F4 | Low | 延后：相同内容两条 pending 时 fingerprint 归属错位，可能丢弃失败气泡并记录虚假 reconciliation。需改用 requestId/投递确认判定收敛，涉及 pending 收敛逻辑重做。 |
+| F6 | Low | 延后：JSONL `0600` 只在首次创建时生效；已在文档 §8 诚实标注为契约说明。 |
+| F7 | Low | 延后：缺少 pagehide/unload flush，最后一个批次可能随页面关闭丢失。 |
+| F8 | Low | 延后：迟到的 `queue.expired` 可能为已 reconciliation 的消息留下不消失的 alert。 |
+| F9 | Low | 部分保留：服务端路由与 dedupe 仍无测试（`src/server/index.ts` 在 import 期 `listen`，需注入式 build 重构）。本轮仅把 `queueLifecycleEvent` 状态映射抽到可测模块以满足 F2 的测试要求，路由/dedupe 测试继续延后。 |
+| F10 | Low | 延后：`imageExpiresAt` 用发送前 1h TTL，可能误报“已过期”（实际 `markSubmitted` 后 TTL 延长）。 |
+| F11 | Low | 延后：`.user-delivery*` 无 CSS（属 `styles.css` 并行 Worker 范围），集成时收口。 |
+| I1 | Info | 延后：`GET /api/prompt-delivery` 无 token 校验（与现有 GET 一致）；是否收紧未决定。 |
+| I2 | Info | 延后：批量上报部分非法时会先写入前 k−1 条再回 400，可能重复记录。 |
+| I3 | Info | 延后：客户端 `console.debug` 无条件输出 metadata-only 事件。 |
+| I4 | Info | 部分处理：删除了重复映射 `deliveryTraceStatusForQueue`，两处映射保留（server 一处、client 一处）；全部收敛到 shared 属延后项。 |
+| I5 | Info | 延后：非法 `requestId` 被静默替换为随机 UUID（响应会回传服务端 requestId）。 |
+| I6 | Info | 延后：`text`/`host-path` 无终态确认（已在文档 §8 标注为已知限制）。 |
+
+### 范围说明
+
+- 为满足 F2 “补服务端事件形状回归测试”的要求，把两个纯映射函数从 `src/server/index.ts` 移到 `src/server/pi-command-queue.ts` 并导出；未做其他重构，也未新增公开 HTTP 接口。
+- F2 的 UI 产品决策采用“显式二次确认 + 重复发送警告”。理由：仍保留用户恢复能力（与首轮已确认的“失败气泡 + 手动恢复”一致），同时消除“一键即发、看起来安全”的误导；选另一方案（隐藏重试、提示切换到 Terminal）会降低可恢复性，故未采用。若需改为隐藏重试，只需删除 `unacked` 分支的按钮块。
+
+## 交付（第二轮）
+
+- commit：见最终回复（本文件在同 commit 内更新）。
+- 修改文件：`src/shared/protocol.ts`、`src/shared/prompt-delivery.ts`、`src/server/pi-command-queue.ts`、`src/server/pi-command-queue.test.ts`、`src/server/prompt-delivery-trace.ts`、`src/server/prompt-delivery-trace.test.ts`、`src/server/index.ts`、`src/web/promptDeliveryTrace.ts`、`src/web/promptDeliveryTrace.test.ts`、`src/web/components/ChatView.tsx`、`src/web/components/ChatView.test.tsx`、`docs/prompt-delivery-observability.md`、本文件。
+- 未 merge / rebase / push；未操作真实 Pi/Herdr Pane；未运行 `npm run dev`。

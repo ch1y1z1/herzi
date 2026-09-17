@@ -14,6 +14,7 @@ const MAX_PENDING_EVENTS = 40;
 const MAX_BATCH_SIZE = 20;
 const FLUSH_DELAY_MS = 300;
 const RETRY_DELAY_MS = 3_000;
+const MAX_FLUSH_ATTEMPTS = 5;
 
 export interface PromptTraceFields {
   transport?: PromptTransport;
@@ -105,11 +106,22 @@ export function recentPromptDeliveryEvents(): PromptDeliveryEvent[] {
 export function flushPromptDeliveryTrace(): Promise<void> {
   if (inFlight) return inFlight;
   if (pending.length === 0) return Promise.resolve();
+  inFlight = drainPendingBatches();
+  return inFlight;
+}
 
-  const batch = pending.slice(0, MAX_BATCH_SIZE);
-  const sent = new Set(batch);
-  inFlight = (async () => {
-    try {
+/**
+ * Sends buffered batches until the buffer is empty or a request fails.
+ *
+ * A single-shot flush used to strand events that arrived while a POST was still
+ * in flight: their timer fired into the pending request and nothing re-scheduled
+ * a flush, so a terminal event could stay unsent forever.
+ */
+async function drainPendingBatches(): Promise<void> {
+  try {
+    while (pending.length > 0) {
+      const batch = pending.slice(0, MAX_BATCH_SIZE);
+      const sent = new Set(batch);
       const response = await apiFetch(ENDPOINT, {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -120,16 +132,25 @@ export function flushPromptDeliveryTrace(): Promise<void> {
       }
       pending = pending.filter((event) => !sent.has(event));
       failureCount = 0;
-    } catch {
-      // Keep the batch buffered (bounded) and retry a few times, then wait for
-      // the next event instead of hammering an unavailable server.
-      failureCount += 1;
-      if (failureCount < 5) scheduleFlush(RETRY_DELAY_MS);
-    } finally {
-      inFlight = null;
     }
-  })();
-  return inFlight;
+  } catch {
+    // Keep the remaining batches buffered (bounded) and retry a few times, then
+    // wait for the next event instead of hammering an unavailable server.
+    failureCount += 1;
+    if (failureCount < MAX_FLUSH_ATTEMPTS) scheduleFlush(RETRY_DELAY_MS);
+  } finally {
+    inFlight = null;
+    // Safety net: anything recorded between the last loop check and this line
+    // still gets its own flush instead of waiting for an unrelated event.
+    if (
+      pending.length > 0 &&
+      failureCount === 0 &&
+      retryTimer === undefined &&
+      flushTimer === undefined
+    ) {
+      scheduleFlush(FLUSH_DELAY_MS);
+    }
+  }
 }
 
 /** Test helper: clears buffers, timers and the last flush error. */
