@@ -129,11 +129,17 @@ const PREVIEW_KEYS = [
   "description",
 ] as const;
 
+/**
+ * `rpiv-todo` 的 action 取值是 create / update / get / list / delete / clear
+ * （见该包的 `docs/tool-schema.md`）。真实会话里出现的是 create、update、
+ * list、delete，因此这里按真实词表映射，不按猜测。
+ */
 const TODO_ACTIONS: Record<string, string> = {
-  add: "新增计划",
+  create: "新增计划",
   update: "更新计划",
-  remove: "删除计划",
+  get: "查看计划",
   list: "查看计划",
+  delete: "删除计划",
   clear: "清空计划",
 };
 

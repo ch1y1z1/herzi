@@ -119,11 +119,19 @@ describe("describeToolCall row semantics", () => {
       },
       {
         toolName: "todo",
-        args: { action: "add", subject: "写单测" },
+        args: { action: "create", subject: "写单测" },
         action: "新增计划",
         target: "写单测",
         bucket: "other",
         // D2: rendered, never counted.
+        fragment: null,
+      },
+      {
+        toolName: "todo",
+        args: { action: "delete", id: 7 },
+        action: "删除计划",
+        target: "#7",
+        bucket: "other",
         fragment: null,
       },
     ];
@@ -309,7 +317,7 @@ describe("summarizeToolRun", () => {
 
   it("keeps todo rows out of the counters and out of the phase verb (D2)", () => {
     const summary = summarizeToolRun([
-      call("todo", { action: "add", subject: "a" }),
+      call("todo", { action: "create", subject: "a" }),
       call("todo", { action: "update", id: 1, status: "completed" }),
       call("todo", { action: "list" }),
       call("bash", { command: "npm test" }),
