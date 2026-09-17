@@ -144,3 +144,20 @@
   其余 Worker/Integration 内容均已通过 cherry-pick 或 merge 进入 main，无内容仅存于待清理分支。
 - 处理：把这两份复审记录从 review branch 复制到 main 的 `.agents/tasks/` 后再清理，避免审计记录随分支删除而丢失。
 - 说明：复审记录中引用的 review-branch commit SHA（如 `39b9423`、`52027bb`、`7ffe565`）在清理后不再可解析；其等价内容已存在于 main 的 `fa2c92f`、`9e62e8f` 与本文档中。
+
+## 工作区清理结果
+
+- 清理前先删除各 worktree 内的 gitignored 构建产物（`node_modules`、`dist`），使 `git worktree remove` 无需 force。
+- 四个 worktree 全部通过 Herdr 移除，`forced: false`：
+  - `wY` agent-20260916-markdown-links
+  - `wZ` agent-20260916-prompt-observability
+  - `wX` integration-20260916-chat-reliability
+  - `w0` review-20260916-chat-reliability
+- 核实结果：
+  - `git worktree list` 仅剩主工作区 `main`；
+  - `/Users/chiyizi/.herdr/worktrees/herzi/` 已空；
+  - `herdr worktree list` 仅剩主 checkout；
+  - Herdr workspace 列表不再包含 `wX`/`wY`/`wZ`/`w0`；
+  - 主工作区 `main` 未受影响，未删除任何 branch。
+- 未处理：主工作区 `wW:p4` 是一个无 agent 的普通 shell Pane，不是本批次创建，保持原样。
+- 保留未删除：四个本批次 branch（`integration-20260916-chat-reliability`、`agent-20260916-markdown-links`、`agent-20260916-prompt-observability`、`review-20260916-chat-reliability`），等待开发者单独确认。
