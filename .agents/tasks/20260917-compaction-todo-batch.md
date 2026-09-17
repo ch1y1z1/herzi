@@ -88,3 +88,10 @@
 - 未推送：`origin/main` 仍为 `4f537f3`。
 - 功能代码仍完整保存在 Worker 分支 `agent-20260917-compaction-todo`（commit `9af9eac`），未丢失。
 - 后续流程：新 Worker 做**系统性自查 + 修复** → **独立 Reviewer** 复审 → 向开发者请求批准 → 才允许合入 main。
+
+## 清理与推送（2026-09-17）
+
+- 内容保全核对：`agent-20260917-compaction-todo`（w16）相对 `agent-20260917-compaction-fix` **无独有文件**（0 个），两分支 `src/` 内容一致（fix 分支即以其 commit `9af9eac` 为 base）。
+- 已清理 w16：删除 gitignored `node_modules`/`dist` 后用 `herdr worktree remove`（`forced: false`）移除 worktree，再删除分支（was `9af9eac`）。
+- 现仅剩在用的 `agent-20260917-compaction-fix`（w17）。
+- 推送：把撤回、规则与全部记录推到 `origin/main`。
