@@ -70,3 +70,14 @@
 - Reviewer 组合态验证：`npm ci` / `npm run typecheck` / `npm test`（11 files / 54 tests）/ `npm run build` 全 PASS；未发现 Worker A×B 交互回归。
 - 真实 Pi/Herdr 端到端与真实 HTTP/WS 行为为 `NOT RUN`（未运行 `npm run dev`）。
 - 处置：Wait —— Worker B commit `55839d5` 仍未进入 integration branch；等待开发者决定 F1/F2/F3 是退回 Worker B 修复，还是接受并在文档中记录为已知限制。
+
+## Review Findings 处置（开发者选择方案 A）
+
+- 2026-09-17 开发者选择方案 A：
+  - F1、F2、F5 退回 Worker B（`wZ:p1`）修复；
+  - F3 作为已知 API contract 限制写入 `docs/prompt-delivery-observability.md`，本轮不重构路由；
+  - F4、F6–F11、I1–I6 记为延后，由 Developer 明确接受，不在本轮实现。
+- F1/F2/F5 的修复必须带能复现原问题的回归测试；F2 还要求 UI 不得再对“claimed 后 ack 丢失”给出一键即发的重试。
+- 已通过 `herdr agent prompt wZ:p1` 派发修复任务；确认状态为 `working`。
+- Worker B 修复后仍需一次复审（更新 review candidate 并让 Reviewer 核对 findings 是否真正关闭），通过后才进入正式集成。
+- 当前 integration branch 仍不含 Worker B commit 55839d5；`main` 未修改。
