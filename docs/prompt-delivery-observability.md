@@ -118,7 +118,6 @@
 - 轮转（`rename`）失败时降级为截断并调用 `onWriteError`，因此会丢失更早的 trace 内容，但 2 MiB 上限保持有效。
 
 ## 9. 已知 API contract 限制（Review F3，暂不修）
-
 **同一个 `requestId` 的 prompt POST 在去重命中时一律返回 `status: "queued"`，不反映该命令的真实状态。**
 
 - 实现位置：`src/server/pi-command-queue.ts` 的 `enqueue()` 在命中 `requestCommands` 时无条件返回旧 command（不携带其 `status`），`src/server/index.ts` 的 prompt 路由在 `pi-native` 分支硬编码 `{ transport: "pi-native", status: "queued" }`。
@@ -130,3 +129,15 @@
 - 当前可达性：**UI 不可达**。`ChatView` 每次尝试（含手动重试）都生成新的 UUID 作为 `requestId`，所以浏览器路径不会命中；只有脚本、未来客户端或“复用 requestId 更安全”的重构才会触发。
 - 为何暂不修：修复需要让 `enqueue()` 返回 `{ command, deduped, status }`（或对终态 `requestId` 返回 409 + 错误码）并让路由据此响应，属于公开 HTTP 语义变更；在同一改动里还会引出“手动重试换新 id 是否应当改为复用旧 id + 幂等”的产品决策。在 UI 不可达的当前阶段，先把它作为明确 contract 记录，避免后续实现者误以为去重响应是幂等可靠的。
 - 相关取舍（可达，已接受）：服务端已接受 prompt 但 HTTP 响应丢失（网络中断、休眠）时，客户端会显示“未送达”，用户点 `重试` 会产生**内容级双发**——服务端只按 `requestId` 去重，而重试刻意换新 id。UI 已在“认领后未 ack”状态要求二次确认，但该状态无法覆盖“响应丢失”场景。
+
+## 10. 第二轮复审新增限制（N1–N5，已接受延后）
+
+第二轮只读复审确认 F1/F2/F5 已关闭，并提出以下非阻断观察；开发者决定记录后延后处理。
+
+- **N1（Low，fail-open 映射）**：`ChatView` 只用 `errorCode === "queue-expired-unacked"` 判定 “回执丢失”，其余一切 `queue.expired` 都落到“未确认送达 + 一键重试”。当浏览器已加载新 bundle、而 3030 上仍是旧 server 进程时，旧 server 会发无 `errorCode` 的过期事件，新前端会误显示为“Pi 没有认领”。
+  - 当前候选的前后端同时更新，不影响本轮结论；风险仅存在于新旧混合运行的短窗口。
+  - 后续若修：把默认值改为安全侧（未知 `errorCode` 的 `queue.expired` 一律按“可能已送达”处理），避免新增错误码时再次 fail-open。
+- **N2（Info）**：`client.delivery-status` 的 `status` 现在记录 UI 投递状态，因此 `queue.dispatched` 对应 `submitted` 而非 `dispatched`；队列事实仍在 `queueStatus` 字段。按 `status === "dispatched"` 过滤的诊断消费者需改读 `queueStatus`。
+- **N3（Info）**：轮转失败降级为截断会丢失更早的 JSONL 内容（内存 ring/LRU 不受影响）；若需要长期留存 trace，应改用带序号的新文件名而非截断。
+- **N4（Info）**：`src/server/pi-command-queue.ts` 的 `PiCommandQueueStatus` 与 `src/shared/protocol.ts` 的 `PromptQueueStatus` 结构重复，需人工保持同步；后续应收敛为同一类型。
+- **N5（Info，未在真实浏览器验证）**：`unacked` 的“重试… → 确认重复发送”两步在同一行内切换渲染，快速双击存在命中确认按钮的可能；`.user-delivery*` 尚无 CSS，布局未定型。
