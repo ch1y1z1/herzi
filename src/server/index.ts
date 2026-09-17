@@ -12,15 +12,27 @@ import type { WebSocket } from "ws";
 import type {
   ChatSnapshot,
   ClientMessage,
+  PromptDeliveryEvent,
+  PromptDeliveryPhase,
+  PromptDeliveryStatus,
   PromptResponse,
   ServerMessage,
 } from "../shared/protocol.js";
+import {
+  isPromptCorrelationId,
+  parsePromptDeliveryEvent,
+} from "../shared/prompt-delivery.js";
 import { HerdrClient } from "./herdr-client.js";
 import { ImageUploadError, ImageUploadStore } from "./image-upload-store.js";
 import { appendManagedAttachments } from "./managed-attachments.js";
-import { PiCommandQueue, parseBridgeIdentity } from "./pi-command-queue.js";
+import {
+  PiCommandQueue,
+  parseBridgeIdentity,
+  queueLifecycleEvent,
+} from "./pi-command-queue.js";
 import { PiRealtimeStore, parsePiBridgeBatch } from "./pi-realtime.js";
 import { PiSessionReader } from "./pi-session-reader.js";
+import { PromptDeliveryTrace } from "./prompt-delivery-trace.js";
 import { TerminalObserver } from "./terminal-observer.js";
 
 const host = "127.0.0.1";
@@ -35,7 +47,25 @@ const piSessions = new PiSessionReader((uploadId, paneId, sessionPath) =>
   uploads.dataUrlFor(uploadId, paneId, sessionPath),
 );
 const piRealtime = new PiRealtimeStore();
-const piCommands = new PiCommandQueue();
+const promptTrace = new PromptDeliveryTrace({
+  onWriteError: (error) =>
+    app.log.warn({ err: error }, "Failed to append the prompt delivery trace"),
+  onDroppedEvent: (reason) =>
+    app.log.warn({ reason }, "Dropped an unsanitizable prompt delivery event"),
+});
+// Queue lifecycle events are the only place where "HTTP succeeded but the prompt
+// was never delivered" becomes visible, so they are traced and pushed live.
+const piCommands = new PiCommandQueue((event) => {
+  const recorded = promptTrace.record(queueLifecycleEvent(event));
+  if (recorded && recorded.phase !== "queue.enqueued") {
+    broadcast({
+      channel: "chat",
+      type: "prompt-delivery",
+      paneId: recorded.paneId,
+      payload: recorded,
+    });
+  }
+});
 const requestToken = randomBytes(32).toString("base64url");
 
 interface TabCreatedResult {
@@ -395,31 +425,78 @@ app.post<{
   }
 });
 
+app.get<{ Querystring: { requestId?: string; limit?: string } }>(
+  "/api/prompt-delivery",
+  async (request, reply) => {
+    const requestId = request.query.requestId;
+    if (requestId !== undefined && !isPromptCorrelationId(requestId)) {
+      return reply.code(400).send({ error: "Invalid requestId" });
+    }
+    return {
+      events: promptTrace.query({
+        ...(requestId ? { requestId } : {}),
+        limit: Number(request.query.limit ?? 50),
+      }),
+    };
+  },
+);
+
+app.post<{ Body: unknown }>("/api/prompt-delivery/events", async (request, reply) => {
+  const body = isRecord(request.body) ? request.body : null;
+  const rawEvents = body?.events;
+  if (!Array.isArray(rawEvents) || rawEvents.length === 0 || rawEvents.length > 50) {
+    return reply.code(400).send({ error: "Invalid prompt delivery event batch" });
+  }
+
+  const now = Date.now();
+  let accepted = 0;
+  for (const rawEvent of rawEvents) {
+    // Client events are re-sanitized here: unknown fields such as prompt text
+    // are dropped before anything is stored.
+    const event = parsePromptDeliveryEvent(rawEvent, { source: "client", now });
+    if (!event) {
+      return reply.code(400).send({ error: "Invalid prompt delivery event" });
+    }
+    if (promptTrace.record(event)) accepted += 1;
+  }
+  return { ok: true, accepted };
+});
+
 app.post<{
   Params: { paneId: string };
   Body: { text?: unknown; requestId?: unknown; attachments?: unknown };
 }>("/api/panes/:paneId/prompt", async (request, reply) => {
-  const pane = herdr.getPane(request.params.paneId);
+  const requestedPaneId = request.params.paneId;
+  const requestId =
+    typeof request.body?.requestId === "string" &&
+    isPromptCorrelationId(request.body.requestId)
+      ? request.body.requestId
+      : randomUUID();
+  const trace = createPromptTraceContext(requestedPaneId, requestId);
+  trace.record("server.received");
+
+  const pane = herdr.getPane(requestedPaneId);
   if (!pane || pane.agent !== "pi") {
+    trace.record("server.rejected", { httpStatus: 404, errorCode: "pane-not-found" });
     return reply.code(404).send({ error: "Pi pane not found" });
   }
 
   const text = typeof request.body?.text === "string" ? request.body.text.trim() : "";
   const uploadIds = parseUploadIds(request.body?.attachments);
   if (!uploadIds) {
+    trace.record("server.rejected", { httpStatus: 400, errorCode: "invalid-attachments" });
     return reply.code(400).send({ error: "Invalid image attachments" });
   }
   if (!text && uploadIds.length === 0) {
+    trace.record("server.rejected", { httpStatus: 400, errorCode: "empty-prompt" });
     return reply.code(400).send({ error: "Prompt text or an image is required" });
   }
   if (text.length > 100_000) {
+    trace.record("server.rejected", { httpStatus: 413, errorCode: "prompt-too-large" });
     return reply.code(413).send({ error: "Prompt is too large" });
   }
+  trace.record("server.validated");
 
-  const requestId =
-    typeof request.body?.requestId === "string" && request.body.requestId.length <= 100
-      ? request.body.requestId
-      : randomUUID();
   const sessionPath = herdr.getPiSessionPath(pane.id);
 
   try {
@@ -431,6 +508,10 @@ app.post<{
       0,
     );
     if (totalImageBytes > 20 * 1024 * 1024) {
+      trace.record("server.rejected", {
+        httpStatus: 413,
+        errorCode: "images-too-large",
+      });
       return reply.code(413).send({ error: "Images exceed the 20 MiB message limit" });
     }
 
@@ -452,6 +533,7 @@ app.post<{
         size: record.size,
         sha256: record.sha256,
       }));
+      trace.record("server.transport-selected", { transport: "pi-native" });
       piCommands.enqueue({
         paneId: pane.id,
         sessionPath,
@@ -481,24 +563,37 @@ app.post<{
     const promptText = managed.length
       ? appendManagedAttachments(text, managed)
       : text;
+    const transport = managed.length ? "host-path" : "text";
 
+    trace.record("server.transport-selected", { transport });
     await herdr.request("agent.prompt", {
       target: pane.id,
       text: promptText,
     });
+    trace.record("server.submitted", { transport, status: "submitted" });
     await Promise.all(uploadIds.map((uploadId) => uploads.markSubmitted(uploadId, "fallback")));
 
     const response: PromptResponse = {
       ok: true,
       requestId,
-      transport: managed.length ? "host-path" : "text",
+      transport,
       status: "submitted",
     };
     return response;
   } catch (error) {
     if (error instanceof ImageUploadError) {
+      trace.record("server.error", {
+        httpStatus: 409,
+        errorCode: `image-${error.code}`,
+        errorClass: error.name,
+      });
       return reply.code(409).send({ error: error.message });
     }
+    trace.record("server.error", {
+      httpStatus: 502,
+      errorCode: "herdr-prompt-failed",
+      errorClass: errorClassName(error),
+    });
     request.log.warn({ err: error }, "Failed to prompt Pi pane");
     return reply.code(502).send({
       error: error instanceof Error ? error.message : "Herdr prompt failed",
@@ -754,18 +849,25 @@ void uploads.cleanup().catch((error) =>
   app.log.warn({ err: error }, "Failed to clean expired image uploads"),
 );
 const uploadCleanupTimer = setInterval(() => {
-  piCommands.cleanup();
   void uploads.cleanup().catch((error) =>
     app.log.warn({ err: error }, "Failed to clean expired image uploads"),
   );
 }, 30 * 60 * 1_000);
 uploadCleanupTimer.unref();
 
+// The command queue TTL is 60s; sweeping often keeps "queued but never claimed"
+// and "claimed but never acknowledged" visible to the UI within about a minute.
+const promptQueueCleanupTimer = setInterval(() => piCommands.cleanup(), 15_000);
+promptQueueCleanupTimer.unref();
+
 const shutdown = async () => {
   for (const observer of observers.values()) observer.stop();
   observers.clear();
   clearInterval(uploadCleanupTimer);
+  clearInterval(promptQueueCleanupTimer);
   piCommands.stop();
+  promptTrace.stop();
+  await promptTrace.flush().catch(() => undefined);
   herdr.stop();
   await app.close();
 };
@@ -800,6 +902,51 @@ function bridgeIdentityMatches(identity: {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+interface PromptTraceFields {
+  transport?: PromptResponse["transport"];
+  status?: PromptDeliveryStatus;
+  httpStatus?: number;
+  errorCode?: string;
+  errorClass?: string;
+}
+
+interface PromptTraceContext {
+  record: (phase: PromptDeliveryPhase, fields?: PromptTraceFields) => void;
+}
+
+/**
+ * Records server-side prompt stages for one request. Events carry only metadata:
+ * the pane id, request id, phase, transport, status, latency and a stable error
+ * code. Prompt text, images and session paths are never passed in.
+ */
+function createPromptTraceContext(
+  paneId: string,
+  requestId: string,
+): PromptTraceContext {
+  const startedAt = Date.now();
+  const traceable = isPromptCorrelationId(paneId) && isPromptCorrelationId(requestId);
+  return {
+    record(phase, fields = {}) {
+      if (!traceable) return;
+      promptTrace.record({
+        requestId,
+        paneId,
+        source: "server",
+        phase,
+        at: Date.now(),
+        latencyMs: Date.now() - startedAt,
+        ...fields,
+      });
+    },
+  };
+}
+
+function errorClassName(error: unknown): string {
+  const name =
+    error instanceof Error && error.name ? error.name : typeof error;
+  return name.replace(/[^A-Za-z0-9._-]/g, "-").slice(0, 64) || "unknown";
 }
 
 function parseUploadIds(value: unknown): string[] | null {

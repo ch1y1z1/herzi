@@ -14,6 +14,7 @@ import type {
   ChatRealtimeState,
   ClientMessage,
   PaneSummary,
+  PromptDeliveryEvent,
   ServerMessage,
 } from "../shared/protocol";
 import { TerminalView } from "./components/TerminalView";
@@ -24,6 +25,9 @@ interface ViewSelection {
   paneId: string;
   mode: ViewMode;
 }
+
+/** Keeps the per-pane prompt delivery push log bounded. */
+const MAX_PROMPT_DELIVERY_EVENTS_PER_PANE = 20;
 
 const ChatView = lazy(() =>
   import("./components/ChatView").then((module) => ({ default: module.ChatView })),
@@ -44,6 +48,9 @@ export function App() {
   );
   const [chatRealtime, setChatRealtime] = useState<
     Record<string, ChatRealtimeState>
+  >({});
+  const [promptDelivery, setPromptDelivery] = useState<
+    Record<string, PromptDeliveryEvent[]>
   >({});
   const socketRef = useRef<WebSocket | null>(null);
 
@@ -68,6 +75,19 @@ export function App() {
             ...current,
             [message.paneId]: message.payload,
           }));
+        } else if (message.channel === "chat" && message.type === "prompt-delivery") {
+          setPromptDelivery((current) => {
+            const forPane = current[message.paneId] ?? [];
+            if (forPane.some((event) => event.seq === message.payload.seq)) {
+              return current;
+            }
+            return {
+              ...current,
+              [message.paneId]: [...forPane, message.payload].slice(
+                -MAX_PROMPT_DELIVERY_EVENTS_PER_PANE,
+              ),
+            };
+          });
         } else if (message.channel === "terminal") {
           setTerminalMessage(message);
         }
@@ -226,6 +246,7 @@ export function App() {
                   key={selectedPane.id}
                   pane={selectedPane}
                   realtime={selectedRealtime}
+                  deliveryEvents={promptDelivery[selectedPane.id]}
                 />
               </Suspense>
             ) : (

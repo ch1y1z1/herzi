@@ -1,6 +1,11 @@
 import { randomUUID } from "node:crypto";
 
-import type { PiBridgeCommand, PiBridgeCommandImage } from "../shared/protocol.js";
+import type {
+  PiBridgeCommand,
+  PiBridgeCommandImage,
+  PromptDeliveryEvent,
+  PromptDeliveryStatus,
+} from "../shared/protocol.js";
 
 const PRESENCE_TTL_MS = 35_000;
 const COMMAND_TTL_MS = 60_000;
@@ -34,11 +39,56 @@ interface PollWaiter {
   onAbort?: () => void;
 }
 
+export type PiCommandLifecyclePhase =
+  | "queue.enqueued"
+  | "queue.claimed"
+  | "queue.dispatched"
+  | "queue.failed"
+  | "queue.expired";
+
+/**
+ * Metadata-only lifecycle signal for one queued Pi bridge command. The raw
+ * bridge error text is intentionally not part of this shape: prompt bodies and
+ * model errors must never reach the delivery trace, only a stable error code.
+ */
+export type PiCommandQueueStatus =
+  | "queued"
+  | "claimed"
+  | "dispatched"
+  | "failed"
+  | "expired";
+
+/**
+ * Metadata-only lifecycle signal for one queued Pi bridge command. The raw
+ * bridge error text is intentionally not part of this shape: prompt bodies and
+ * model errors must never reach the delivery trace, only a stable error code.
+ */
+export interface PiCommandLifecycleEvent {
+  phase: PiCommandLifecyclePhase;
+  requestId: string;
+  paneId: string;
+  commandId: string;
+  /** Milliseconds elapsed since the command was enqueued. */
+  latencyMs: number;
+  queueStatus: PiCommandQueueStatus;
+  /**
+   * Stable code; never the raw error message. Expiry distinguishes
+   * `queue-expired-unclaimed` (never polled, so the prompt was never sent) from
+   * `queue-expired-unacked` (claimed but the acknowledgement never arrived, so
+   * the Pi session may well contain the prompt).
+   */
+  errorCode?: string;
+}
+
 export class PiCommandQueue {
   private presence = new Map<string, BridgePresence>();
   private commands = new Map<string, QueuedCommand>();
   private requestCommands = new Map<string, string>();
   private waiters = new Map<string, Set<PollWaiter>>();
+
+  constructor(
+    private readonly onLifecycle?: (event: PiCommandLifecycleEvent) => void,
+  ) {}
 
   touch(identity: BridgeIdentity): void {
     this.presence.set(identity.paneId, { ...identity, lastSeen: Date.now() });
@@ -80,6 +130,7 @@ export class PiCommandQueue {
       status: "queued",
     });
     this.requestCommands.set(input.requestId, command.id);
+    this.emitLifecycle(command.id, "queue.enqueued", "queued");
     this.deliverWaiting(input.paneId);
     return command;
   }
@@ -127,6 +178,12 @@ export class PiCommandQueue {
     }
     queued.status = status;
     queued.error = error?.slice(0, 500);
+    this.emitLifecycle(
+      commandId,
+      status === "dispatched" ? "queue.dispatched" : "queue.failed",
+      status,
+      status === "failed" ? "bridge-failed" : undefined,
+    );
     return true;
   }
 
@@ -147,6 +204,24 @@ export class PiCommandQueue {
     }
     for (const [commandId, queued] of this.commands) {
       if (now - queued.createdAt <= COMMAND_TTL_MS) continue;
+      if (queued.status === "queued") {
+        // The bridge never polled it, so nothing was sent to Pi.
+        this.emitLifecycle(
+          commandId,
+          "queue.expired",
+          "expired",
+          "queue-expired-unclaimed",
+        );
+      } else if (queued.status === "claimed") {
+        // The bridge claimed it but never acknowledged: the prompt may already
+        // be in the session, only the receipt is missing.
+        this.emitLifecycle(
+          commandId,
+          "queue.expired",
+          "expired",
+          "queue-expired-unacked",
+        );
+      }
       this.commands.delete(commandId);
       if (this.requestCommands.get(queued.command.requestId) === commandId) {
         this.requestCommands.delete(queued.command.requestId);
@@ -172,10 +247,34 @@ export class PiCommandQueue {
       ) {
         queued.status = "claimed";
         queued.claimedBy = identity.runtimeId;
+        this.emitLifecycle(queued.command.id, "queue.claimed", "claimed");
         return queued.command;
       }
     }
     return null;
+  }
+
+  private emitLifecycle(
+    commandId: string,
+    phase: PiCommandLifecyclePhase,
+    queueStatus: PiCommandQueueStatus,
+    errorCode?: string,
+  ): void {
+    const queued = this.commands.get(commandId);
+    if (!queued) return;
+    try {
+      this.onLifecycle?.({
+        phase,
+        requestId: queued.command.requestId,
+        paneId: queued.paneId,
+        commandId,
+        latencyMs: Math.max(0, Date.now() - queued.createdAt),
+        queueStatus,
+        ...(errorCode ? { errorCode } : {}),
+      });
+    } catch {
+      // Delivery tracing must never break the queue itself.
+    }
   }
 
   private deliverWaiting(paneId: string): void {
@@ -196,6 +295,47 @@ export class PiCommandQueue {
     paneWaiters?.delete(waiter);
     if (paneWaiters?.size === 0) this.waiters.delete(waiter.identity.paneId);
     waiter.resolve(command);
+  }
+}
+
+/**
+ * Maps a queue lifecycle signal onto a metadata-only trace event. Expired
+ * commands must never keep reporting their pre-expiry `claimed`/`queued` status:
+ * the status has to read as "delivery unconfirmed" so trace consumers and the UI
+ * agree. The two expiry causes stay distinguishable through `errorCode`.
+ */
+export function queueLifecycleEvent(
+  event: PiCommandLifecycleEvent,
+  at: number = Date.now(),
+): PromptDeliveryEvent {
+  return {
+    requestId: event.requestId,
+    paneId: event.paneId,
+    source: "server",
+    phase: event.phase,
+    at,
+    latencyMs: event.latencyMs,
+    queueStatus: event.queueStatus,
+    status: queueStatusToDeliveryStatus(event.queueStatus),
+    commandId: event.commandId,
+    ...(event.errorCode ? { errorCode: event.errorCode } : {}),
+  };
+}
+
+export function queueStatusToDeliveryStatus(
+  status: PiCommandQueueStatus,
+): PromptDeliveryStatus {
+  switch (status) {
+    case "dispatched":
+      return "dispatched";
+    case "claimed":
+      return "claimed";
+    case "failed":
+      return "failed";
+    case "expired":
+      return "delivery-unconfirmed";
+    default:
+      return "queued";
   }
 }
 

@@ -734,6 +734,37 @@ button {
   background: transparent;
 }
 
+/* Markdown 链接：MarkdownLink 负责行为，样式同时兼容 .markdown-body 下的任意
+   anchor（兜底）与 .markdown-link 这个稳定钩子。Tailwind preflight 会把链接
+   重置成继承色并去掉下划线，所以这里必须显式给出默认高亮。 */
+.markdown-body a,
+.markdown-link {
+  color: #2f6fb0;
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
+  overflow-wrap: anywhere;
+  border-radius: 3px;
+  transition:
+    color 100ms ease,
+    background-color 100ms ease;
+}
+
+.markdown-body a:hover,
+.markdown-link:hover {
+  color: #1d4f86;
+  background: #e9f0f9;
+  text-decoration-thickness: 2px;
+}
+
+.markdown-body a:focus-visible,
+.markdown-link:focus-visible {
+  color: #1d4f86;
+  background: #e9f0f9;
+  outline: 2px solid #4f8bc9;
+  outline-offset: 1px;
+}
+
 .reasoning-block,
 .activity-group,
 .worked-row {

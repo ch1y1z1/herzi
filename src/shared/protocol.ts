@@ -157,11 +157,77 @@ export type PromptDeliveryStatus =
   | "delivery-unconfirmed"
   | "failed";
 
+export type PromptTransport = "text" | "host-path" | "pi-native";
+
 export interface PromptResponse {
   ok: true;
   requestId: string;
-  transport: "text" | "host-path" | "pi-native";
+  transport: PromptTransport;
   status: PromptDeliveryStatus;
+}
+
+/**
+ * Lifecycle stages of a single prompt delivery attempt. Every stage is recorded
+ * as metadata only: prompt text, image bytes, tokens and absolute session paths
+ * must never appear in a trace event.
+ *
+ * Client stages run in the browser, server stages in the Herzi server process,
+ * and `queue.*` stages describe the Pi bridge command queue.
+ */
+export type PromptDeliveryPhase =
+  | "client.submit"
+  | "client.optimistic"
+  | "client.response"
+  | "client.error"
+  | "client.retry"
+  | "client.delivery-status"
+  | "client.reconciliation"
+  | "server.received"
+  | "server.rejected"
+  | "server.validated"
+  | "server.transport-selected"
+  | "server.submitted"
+  | "server.error"
+  | "queue.enqueued"
+  | "queue.claimed"
+  | "queue.dispatched"
+  | "queue.failed"
+  | "queue.expired";
+
+export type PromptDeliverySource = "client" | "server";
+
+export type PromptQueueStatus =
+  | "queued"
+  | "claimed"
+  | "dispatched"
+  | "failed"
+  | "expired";
+
+/**
+ * One bounded, metadata-only prompt delivery trace event. Field values are
+ * restricted by the shared sanitizer so that correlation stays possible without
+ * ever persisting prompt content or private paths.
+ */
+export interface PromptDeliveryEvent {
+  /** Server-assigned monotonic ordering, absent before the event is recorded. */
+  seq?: number;
+  requestId: string;
+  paneId: string;
+  source: PromptDeliverySource;
+  phase: PromptDeliveryPhase;
+  /** Epoch milliseconds; client values are clamped to a sane window. */
+  at: number;
+  /** 1-based delivery attempt for the same visible message. */
+  attempt?: number;
+  transport?: PromptTransport;
+  status?: PromptDeliveryStatus;
+  httpStatus?: number;
+  errorCode?: string;
+  errorClass?: string;
+  latencyMs?: number;
+  queueStatus?: PromptQueueStatus;
+  /** Pi bridge command id (opaque UUID), never a session path. */
+  commandId?: string;
 }
 
 export interface PiBridgeCommandImage {
@@ -223,6 +289,12 @@ export type ServerMessage =
       type: "realtime";
       paneId: string;
       payload: ChatRealtimeState;
+    }
+  | {
+      channel: "chat";
+      type: "prompt-delivery";
+      paneId: string;
+      payload: PromptDeliveryEvent;
     }
   | {
       channel: "terminal";
