@@ -34,3 +34,9 @@
 - `origin/main` 已同步到 `dc8282c`（工具展示增强 + `Worked for` 修复 + 记录）。
 - 待办清单：[`20260917-pending-backlog.md`](./20260917-pending-backlog.md)。
 - 下一批候选：三项延后项（F11 投递状态行 CSS、flaky 定时器清理、N1 fail-open 映射）单独一轮；`ask_user_question` 待与开发者详谈后再定。
+
+## 影响本批次的全局约定（2026-09-17）
+
+- 开发者要求在全局 `~/.pi/agent/AGENTS.md` 增加一节「工具文案」：`todo` 的 `activeForm`（进行中那一句 spinner 简述）**永远用中文**，同列表里一起展示的 `subject` 同样用中文，其它面向展示的一句话描述也一律用中文。
+- 依据：`activeForm` 的官方定义是 "Present-continuous spinner label shown while status is in_progress"（见 `@juicesharp/rpiv-todo/tool/types.ts`），正是「一句话简述当前工作」那句话。
+- 对本批次的影响：**无代码影响** —— todo 状态条只是原样展示 `activeForm` / `subject`；该约定约束的是写这些字段的 agent，因此不需要打断当前 Worker。
