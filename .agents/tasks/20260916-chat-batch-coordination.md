@@ -81,3 +81,13 @@
 - 已通过 `herdr agent prompt wZ:p1` 派发修复任务；确认状态为 `working`。
 - Worker B 修复后仍需一次复审（更新 review candidate 并让 Reviewer 核对 findings 是否真正关闭），通过后才进入正式集成。
 - 当前 integration branch 仍不含 Worker B commit 55839d5；`main` 未修改。
+
+## Worker B 修复与第二轮复审
+
+- Worker B 修复提交：`3e7c5e5`（14 files, +659/−105），状态 `idle`、worktree clean。
+- 修复内容：F1 drain 式 flush + 可控挂起 Promise 回归测试；F2 新增 `PromptQueueStatus "expired"`、过期事件不再沿用旧 status、区分 `queue-expired-unclaimed` / `queue-expired-unacked`、client trace 记录与 UI 一致、unacked 重试需二次确认；F5 rotate 失败不再清零 `fileBytes`；F3 写入 `docs/prompt-delivery-observability.md` §9；F4/F6–F11/I1–I6 记入 Worker B 任务记录「Review 处置」。
+- 范围检查：未触碰 Worker A 文件（`markdownLink*`、`markdownPlugins.ts`、`styles.css`）。
+- 唯一重构：`queueLifecycleEvent` / `queueStatusToDeliveryStatus` 从 `src/server/index.ts` 迁至 `src/server/pi-command-queue.ts` 并导出，用于补服务端事件形状测试；无新 HTTP 接口。
+- review candidate 更新：`52027bb`（= 7f75693 + 3e7c5e5），再追加第二轮任务定义 `05af238`。
+- 已通过 `herdr agent prompt w0:p1` 派发第二轮只读复审，确认状态为 `working`；Integrator 停止等待。
+- integration branch 仍不含 Worker B；`main` 未修改。
