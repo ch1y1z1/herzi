@@ -930,8 +930,14 @@ button {
  * message, not output), so the error text is what the generic Arguments/Error
  * detail shows — and it was the same gray as everything else. R5 asks for errors
  * in red, using the color the state icon already uses.
+ *
+ * The rule is keyed on the failing **result section**, not on the `.tool-error`
+ * ancestor: an activity group carries `tool-error` when any one of its calls
+ * failed, so `.tool-error .tool-detail pre` also painted the successful siblings'
+ * results red (review F1). The group's red state icon is separate and unchanged
+ * (`.tool-error .tool-state` above).
  */
-.tool-error .tool-detail pre {
+.tool-result-error pre {
   color: #c2635d;
 }
 
@@ -968,8 +974,6 @@ button {
 }
 
 .tool-detail pre {
-  max-height: 320px;
-  overflow: auto;
   margin: 0;
   padding: 0;
   color: #5e635a;
@@ -988,16 +992,16 @@ button {
  * their existing styling; only the content inside a view is styled here. Long
  * content is not folded and is not virtualized: every line stays in the DOM and
  * the shared scroll window below bounds how much of it is visible.
+ *
+ * No `<pre>` in the panel is a scroll container of its own any more: a view's
+ * content and the generic Arguments/Result detail both sit in a
+ * `.tool-view-scroll` (review F4), so the window is the single place that bounds
+ * height.
  */
 .tool-view {
   display: grid;
   gap: 7px;
   min-width: 0;
-}
-
-.tool-view pre {
-  max-height: none;
-  overflow: visible;
 }
 
 /*
@@ -1006,7 +1010,7 @@ button {
  * `--tool-view-line-height` is the single line height of tool content: the cap
  * below and the row heights inside are both derived from it, so a body taller
  * than the window shows exactly 16 of those lines — not 15, not 17. The `16`
- * matches `SCROLL_BOX_LINES` in `toolViews/ScrollBox.tsx`, which is what decides
+ * matches `SCROLL_WINDOW_LINES` in `toolViews/ScrollBox.tsx`, which decides
  * whether a view says 可滚动查看.
  *
  * No padding and no border: `box-sizing: border-box` is global, and either would

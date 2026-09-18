@@ -9,7 +9,7 @@
 import { cleanup, fireEvent, render } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { SCROLL_BOX_LINES, ScrollBox } from "./ScrollBox";
+import { SCROLL_WINDOW_LINES, ScrollBox } from "./ScrollBox";
 
 /** Minimal stand-in for the platform observer, which jsdom does not implement. */
 class FakeResizeObserver {
@@ -43,7 +43,7 @@ describe("ScrollBox", () => {
     const boxes = container.querySelectorAll(".tool-view-scroll");
     expect(boxes).toHaveLength(1);
     expect(boxes[0]?.getAttribute("data-scroll-lines")).toBe(
-      String(SCROLL_BOX_LINES),
+      String(SCROLL_WINDOW_LINES),
     );
     expect(container.querySelector(".tool-view-scroll .tool-view-scroll")).toBeNull();
   });

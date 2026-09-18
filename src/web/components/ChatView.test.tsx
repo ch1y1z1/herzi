@@ -91,10 +91,16 @@ function jsonResponse(body: unknown, status = 200): Response {
 
 type ApiFetchCall = Parameters<typeof apiFetch>;
 
+/**
+ * Calls to the prompt endpoint itself.
+ *
+ * Matched on the end of the path: a substring check for `/prompt` also caught
+ * `/api/prompt-delivery/events`, so when the 300ms client-trace flush landed
+ * inside a test's wait window, the trace upload counted as a second prompt call
+ * and "No automatic retry" failed (review F5, a pre-existing flake).
+ */
 function promptCalls(): ApiFetchCall[] {
-  return mockedApiFetch.mock.calls.filter(([url]) =>
-    String(url).includes("/prompt"),
-  );
+  return mockedApiFetch.mock.calls.filter(([url]) => /\/prompt(?:[?#]|$)/u.test(String(url)));
 }
 
 function requestIdOf(call: ApiFetchCall): string {
@@ -1435,6 +1441,81 @@ describe("ChatView activity presentation", () => {
         (element) => element.textContent,
       ),
     ).toEqual(["Arguments", "Error"]);
+  });
+
+  it("bounds the generic Arguments/Result detail with the shared window (F4)", async () => {
+    stubChat(
+      [
+        userMessage(),
+        assistantMessage("a1", [
+          toolPart(
+            "call-bash",
+            "bash",
+            { command: "npm test" },
+            { result: "boom", isError: true },
+          ),
+          { type: "text", text: "done" },
+        ]),
+      ],
+      false,
+    );
+
+    render(<ChatView pane={pane} />);
+    await screen.findByText("done");
+
+    // Arguments and Error, each in a window — the same component the views use,
+    // on a path that has no `.tool-view` ancestor.
+    await waitFor(() =>
+      expect(document.querySelectorAll(".tool-detail .tool-view-scroll")).toHaveLength(2),
+    );
+    const detail = document.querySelector(".tool-detail") as HTMLElement;
+    expect(
+      Array.from(detail.querySelectorAll("section")).map(
+        (section) => section.className,
+      ),
+    ).toEqual(["tool-data", "tool-result tool-result-error"]);
+    // No `<pre>` in the panel scrolls on its own any more.
+    for (const pre of detail.querySelectorAll("pre")) {
+      expect(pre.parentElement?.className).toContain("tool-view-scroll");
+    }
+    expect(detail.textContent).toContain("boom");
+  });
+
+  it("marks only the failed call's own result when one call in a group failed (F1)", async () => {
+    stubChat(
+      [
+        userMessage(),
+        assistantMessage("a1", [
+          toolPart(
+            "call-fail",
+            "bash",
+            { command: "npm test" },
+            { result: "boom", isError: true },
+          ),
+          toolPart("call-ok", "mystery_tool", { query: "x" }, { result: "fine" }),
+          { type: "text", text: "done" },
+        ]),
+      ],
+      false,
+    );
+
+    render(<ChatView pane={pane} />);
+    await screen.findByText("done");
+
+    await waitFor(() =>
+      expect(document.querySelector(".activity-tool-group")).toBeTruthy(),
+    );
+    const group = document.querySelector(".activity-tool-group") as HTMLElement;
+    // The group represents the failure — its own state icon is red…
+    expect(group.className).toContain("tool-error");
+    const items = Array.from(group.querySelectorAll(".tool-item")) as HTMLElement[];
+    expect(items).toHaveLength(2);
+    // …but the error class must reach only the failed call's result section,
+    // never a successful sibling's (review F1).
+    const failed = items.find((item) => item.textContent?.includes("boom"));
+    const succeeded = items.find((item) => item.textContent?.includes("fine"));
+    expect(failed?.querySelectorAll(".tool-result-error")).toHaveLength(1);
+    expect(succeeded?.querySelector(".tool-result-error")).toBeNull();
   });
 
   it("keeps an unknown tool on the raw detail even when it carries a display", async () => {

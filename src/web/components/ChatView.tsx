@@ -60,6 +60,7 @@ import {
   type ToolDiff,
 } from "../toolCatalog";
 import { toolViewFor, type ToolDetailItem } from "../toolViews";
+import { ScrollBox } from "../toolViews/ScrollBox";
 import { latestAssistantTurn, useLatestTurnActivity } from "../turnActivity";
 import {
   ChatImagePart,
@@ -1452,6 +1453,10 @@ function ToolDetail({ item }: { item: ToolDetailItem }) {
 }
 
 function GenericToolDetail({ item }: { item: ToolDetailItem }) {
+  // Both sections live in the same bounded window the views use (review F4): the
+  // generic detail is the path a failed, unknown or unparseable call takes, and
+  // it used to be the one place still scrolling inside a 320px `<pre>` of its
+  // own instead of using the shared window.
   return (
     <>
       <ToolData label="Arguments" value={item.args} />
@@ -1460,6 +1465,7 @@ function GenericToolDetail({ item }: { item: ToolDetailItem }) {
           toolName={item.toolName}
           label={item.isError ? "Error" : "Result"}
           value={item.result}
+          isError={Boolean(item.isError)}
         />
       )}
     </>
@@ -1523,9 +1529,11 @@ function ToolDiffText({ diff, className }: { diff: ToolDiff; className: string }
 
 function ToolData({ label, value }: { label: string; value: unknown }) {
   return (
-    <section>
+    <section className="tool-data">
       <label>{label}</label>
-      <pre>{formatValue(value)}</pre>
+      <ScrollBox>
+        <pre>{formatValue(value)}</pre>
+      </ScrollBox>
     </section>
   );
 }
@@ -1534,18 +1542,28 @@ function ToolResultData({
   toolName,
   label,
   value,
+  isError,
 }: {
   toolName: string;
   label: string;
   value: unknown;
+  isError: boolean;
 }) {
   const payload = asToolResultPayload(value);
   const visibleValue = payload ? payload.value : value;
   const formattedValue = formatValue(visibleValue);
   return (
-    <section>
+    // `tool-result-error` is on the failing result itself, not read from an
+    // ancestor: an activity group marks itself `tool-error` when *any* call in
+    // it failed, so a rule keyed on that ancestor (`.tool-error .tool-detail
+    // pre`, review F1) colored the successful siblings' results too.
+    <section className={`tool-result${isError ? " tool-result-error" : ""}`}>
       <label>{label}</label>
-      {formattedValue && <pre>{formattedValue}</pre>}
+      {formattedValue && (
+        <ScrollBox>
+          <pre>{formattedValue}</pre>
+        </ScrollBox>
+      )}
       <ToolResultImagePreview toolName={toolName} result={value} />
     </section>
   );

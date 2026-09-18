@@ -12,12 +12,27 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
-import { SCROLL_BOX_LINES } from "./toolViews/ScrollBox";
+import { SCROLL_WINDOW_LINES } from "./toolViews/ScrollBox";
 
 const STYLES = readFileSync(
   fileURLToPath(new URL("./styles.css", import.meta.url)),
   "utf8",
 );
+
+/**
+ * Every rule of the stylesheet as `{ selectors, body }`.
+ *
+ * Comments are stripped from the selector text (a comment directly above a rule
+ * is not part of its selector), so a rule can be looked up by its exact selector
+ * list and an absent rule can be asserted as absent even when a comment next to
+ * it mentions the selector.
+ */
+function rulesOf(): Array<{ selectors: string; body: string }> {
+  return Array.from(STYLES.matchAll(/([^{}]*)\{([^{}]*)\}/gu)).map((rule) => ({
+    selectors: (rule[1] ?? "").replace(/\/\*[\s\S]*?\*\//gu, "").trim(),
+    body: rule[2] ?? "",
+  }));
+}
 
 /**
  * Body of the one rule whose selector list is exactly `selector`.
@@ -26,13 +41,19 @@ const STYLES = readFileSync(
  * of the combined `.diff-line,\n.code-line {` rule, which is a different rule.
  */
 function cssRule(selector: string): string {
-  for (const rule of STYLES.matchAll(/([^{}]*)\{([^{}]*)\}/gu)) {
-    const selectors = (rule[1] ?? "")
-      .replace(/\/\*[\s\S]*?\*\//gu, "")
-      .trim();
-    if (selectors === selector) return rule[2] ?? "";
-  }
-  throw new Error(`stylesheet has no rule for ${selector}`);
+  const rule = rulesOf().find((candidate) => candidate.selectors === selector);
+  if (!rule) throw new Error(`stylesheet has no rule for ${selector}`);
+  return rule.body;
+}
+
+/** Whether any rule's selector list is exactly `selector`. */
+function hasRule(selector: string): boolean {
+  return rulesOf().some((rule) => rule.selectors === selector);
+}
+
+/** Whether any rule's selector list mentions `fragment` at all. */
+function anySelectorIncludes(fragment: string): boolean {
+  return rulesOf().some((rule) => rule.selectors.includes(fragment));
 }
 
 describe("the shared scroll window", () => {
@@ -45,7 +66,7 @@ describe("the shared scroll window", () => {
     expect(cap).not.toBeNull();
     // The stylesheet and the component have to agree on how many lines that is,
     // or a view would say 可滚动查看 for content that fits.
-    expect(Number(cap?.[1])).toBe(SCROLL_BOX_LINES);
+    expect(Number(cap?.[1])).toBe(SCROLL_WINDOW_LINES);
     expect(box).toContain("overflow-y: auto");
     // `box-sizing: border-box` is global, so padding or a border would come out
     // of the 16 visible lines.
@@ -70,7 +91,7 @@ describe("the shared scroll window", () => {
   });
 
   it("has no expand/collapse styling left to render (R3)", () => {
-    expect(STYLES).not.toContain("tool-view-expand");
+    expect(anySelectorIncludes("tool-view-expand")).toBe(false);
   });
 });
 
@@ -90,7 +111,7 @@ describe("diff rows (R5)", () => {
 
   it("leaves context rows without a band", () => {
     // No rule of its own: the context row keeps the panel background.
-    expect(STYLES).not.toContain(".diff-line-context");
+    expect(anySelectorIncludes(".diff-line-context")).toBe(false);
   });
 
   it("keeps the gutter fixed, right-aligned and out of the selection", () => {
@@ -109,12 +130,36 @@ describe("commands and errors (R5)", () => {
   });
 
   it("colors a failed result red, over the panel's gray", () => {
-    // `.tool-detail pre` sets the gray for every `<pre>` in the panel, so the
-    // error rules have to be at least as specific as it.
-    const viewRule = cssRule(".output-body pre.output-error");
-    expect(viewRule).toContain("color: #c2635d");
-    const fallbackRule = cssRule(".tool-error .tool-detail pre");
-    expect(fallbackRule).toContain("color: #c2635d");
+    // `.output-body` gives this rule one more class than `.tool-detail pre`
+    // (which sets the gray for every `<pre>` in the panel), so the red wins
+    // whatever the source order is.
+    expect(cssRule(".output-body pre.output-error")).toContain("color: #c2635d");
+  });
+
+  it("keys the error red on the failing result, not on an ancestor (F1)", () => {
+    expect(cssRule(".tool-result-error pre")).toContain("color: #c2635d");
+    // An activity group carries `tool-error` when *any* of its calls failed, so
+    // these ancestor-keyed rules painted the successful siblings' results red.
+    expect(hasRule(".tool-error .tool-detail pre")).toBe(false);
+    expect(anySelectorIncludes(".tool-error .tool-result")).toBe(false);
+    // The group's own red state icon stays as it was.
+    expect(cssRule(".tool-error .tool-state")).toContain("color: #c2635d");
+  });
+});
+
+describe("the generic Arguments/Result detail (F4)", () => {
+  it("is bounded by the shared window, not by a scrolling `<pre>`", () => {
+    const pre = cssRule(".tool-detail pre");
+    expect(pre).not.toContain("max-height");
+    expect(pre).not.toContain("overflow");
+  });
+
+  it("needs no `.tool-view` ancestor for that window", () => {
+    // The variable is defined on the window itself, which is why the generic
+    // detail (a failed, unknown or unparseable call) gets the same 16-line
+    // window as the registered views do.
+    expect(cssRule(".tool-view-scroll")).toContain("--tool-view-line-height:");
+    expect(anySelectorIncludes(".tool-view .tool-view-scroll")).toBe(false);
   });
 });
 
