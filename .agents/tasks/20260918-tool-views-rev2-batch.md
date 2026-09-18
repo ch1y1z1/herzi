@@ -47,6 +47,38 @@
 - `herdr agent start herzi_viewrev2 --kind pi --pane w1C:p1` 成功；prompt 已发送，`herdr agent get` 确认 `agent_status: working`，Integrator 停止等待并交回控制。
 - 开发者可直接在 `w1C:p1` 与 Worker 交互。
 
+## Worker 完成（2026-09-18）
+
+- Agent `herzi_viewrev2` 状态 `idle`，worktree clean，交付 2 个 commit：`0d973db`（shiki 内核 + 共享 ScrollBox + 依赖）、`91519de`（视图迁移 + 测试 + 记录）。22 文件，+1785 / −267。
+- **依赖**：`git diff` 确认只新增 `shiki: ^4.4.3`，无其它包变更。
+- **范围**：`git diff --name-only b5b49a7..91519de` 全部在契约 §3 write set 内；`src/server/**`、`src/shared/**`、`integrations/**` **零改动**。
+- **超出预期的干净**：`ChatView.tsx` 一行未改，正文代码块通过 `markdownPlugins.ts` 的 `components.SyntaxHighlighter` 钩子接入（仅 1 行改动）。
+- 自报验证：目标测试 140 PASS；`npm run typecheck` PASS；`npm test` PASS（20 files / **298 tests**）；`npm run build` PASS。
+- 体积（同一方法 `rm -rf dist && npm run build`）：`index-*.js` 544.87 kB **不变**；`ChatView-*.js` 771.73 → 776.00 kB（gzip +1.81 kB）；CSS 65.79 → 66.31 kB；shiki 内核 93.56 kB、引擎 57.63 kB、13 个语言 chunk 与 2 个主题 chunk 均在按需 chunk 内（首屏仅多约 4.7 kB）。
+- 开发者在 Pane 中另行给过两次决定（已落地）：`bash` 输出打开即在底部并跟随；错误红色（代价：该详情的 `Arguments` 段也一并变红）。
+- Worker 自述的限制（已作为 review 重点）：① 未做真实浏览器验收，「16 行」只是 CSS/常量层断言，没有真的量过渲染高度；② `bash` 尾部跟随只测了逻辑（jsdom 无 `ResizeObserver`），真实 `<details>` 展开触发观察器未实测；③ Markdown 类容器按 16 × 代码行高，可见 Markdown 行数略少于 16；④ `R7` 只加高亮、未给 Chat 代码块加高度窗口；⑤ 通用降级详情 `.tool-detail pre` 仍是 `max-height: 320px`，未纳入 16 行窗口。
+
+## 独立 Review 派发（2026-09-18）
+
+| 项目 | 值 |
+| --- | --- |
+| Review 分支 | `review-20260918-tool-views-rev2`（base = Worker HEAD `91519de`） |
+| Review worktree | `/Users/chiyizi/.herdr/worktrees/herzi/review-20260918-tool-views-rev2` |
+| Herdr | workspace `w1D` / pane `w1D:p1` |
+| Reviewer agent | `herzi_rev2review`（`--kind pi`，与 Worker 一致） |
+| Review 契约 | `.agents/tasks/20260918-tool-views-rev2-review.md`（commit `89af358`） |
+
+十项重点，优先打的四条：
+
+1. **HTML 注入安全**：shiki 输出经 `dangerouslySetInnerHTML` 注入，必须证明注入串只能来自 shiki 且代码内容被正确转义（畸形样本复现）。
+2. **是否真的按需**：自己重新 build，并核实首屏 `index-*.js` 内不含 shiki。
+3. **「16 行」是否精确**：容器高度与行高是否只有一个来源；若 `styles.test.ts` 只是读源码正则，必须指出它证明不了渲染高度。
+4. **正文钩子真伪**：`components.SyntaxHighlighter` 是否真是 assistant-ui 支持的 prop；若不支持，正文高亮其实未生效。
+
+其余：删除是否彻底、`bash` 自动滚底的实现与用户上滚行为、错误红色范围、降级详情 320px 与 R1/R3 的冲突、回归面、测试质量与 10 次连续跑。
+
+已发送 prompt 并确认 `agent_status: working`；Integrator 停止等待并交回控制。
+
 ## 下一步（等开发者通知后由 Integrator 执行）
 
 1. 接收交付：范围检查（尤其确认未改 `src/server/**`、`src/shared/**`、依赖只多了 `shiki`）、worktree clean、记录与实际 diff 相符。
