@@ -44,7 +44,39 @@
 3. findings 处置完毕后再集成：cherry-pick → `npm run typecheck` / `npm test` / `npm run build`。
 4. 汇报并等待是否合入 `main` 的决定（逐批单独批准）。
 
+## Worker 完成（2026-09-18）
+
+- Agent `herzi_toolviews` 状态 `idle`，worktree clean，交付 3 个 commit：`c06e4c4`（协议 + 服务端白名单投影 + bridge 实时投影）、`0cc3bea`（`src/web/toolViews/**` 8 个视图 + `ChatView` 接线 + 样式）、`04ed530`（P2.5 `todo` / `ask_user_question` 卡片 + 任务记录两节）。
+- 规模：22 文件，+4225 / −29。10 个工具 → 8 个视图（`read`/`write` 共用 `CodeView`，`ffgrep`/`fffind` 共用 `MatchListView`）。
+- Worker 自报验证：`npm ci` PASS（依赖无 diff）；§6 四文件 vitest 177/177 PASS（连续 32 次）；`typecheck` PASS；`npm test` 251/251 PASS（连续 8 次）；`build` PASS；真实浏览器 / 真实 Pane 验收与 `npm run dev` 均 NOT RUN。
+- Worker 已记录一次**未能复现**的测试失败（首次 4 文件同时运行时 `1 failed | 176 passed`，输出未保存，随后 40 次通过；已加 `afterEach` 统一 `unstubAllGlobals`），提请 Reviewer 与集成态复跑。
+- **Worker 在 P2.5 遇到的协议字段新增已由开发者当场批准**：新增 `question` + `todo` 两个白名单字段，不加 `pageIndex`。
+
+## Integrator 接收检查（2026-09-18）
+
+- **范围**：`git diff --name-only 4b549a1..04ed530` 全部落在契约 §3 write set 内，无越界。
+- **既有行为不变**：`src/web/toolCatalog.ts` 只把 `TODO_ACTIONS`、`webHost` 从模块内提升为导出（+8/−2，无逻辑改动），折叠行语义未变；`src/shared/protocol.ts` 为纯新增 108 行（0 删除），`result` 语义未动。
+- **记录一致**：任务记录含「过程与决策」（10 条有意偏离，逐条可核对）、「格式来源」（只读 Pi 源码，未读 session，未写入真实内容）、「不稳定项」、「剩余风险与未验证项」。
+- **两处笔误已核实不影响交付**：Worker 交付说明写「分支 `herzi/agent-…`、2 个 commit」，实际分支为 `agent-20260917-tool-call-detail-ui`、3 个 commit。
+- 结论：交付完整、可进入独立 review。
+
+## 独立 Review 派发（2026-09-18）
+
+| 项目 | 值 |
+| --- | --- |
+| Review 分支 | `review-20260917-tool-call-detail-ui`（base = Worker HEAD `04ed530`） |
+| Review worktree | `/Users/chiyizi/.herdr/worktrees/herzi/review-20260917-tool-call-detail-ui` |
+| Herdr | workspace `w1A` / pane `w1A:p1` |
+| Reviewer agent | `herzi_toolreview`（`--kind claude`，与 Worker 不同模型以获得交叉视角） |
+| Review 契约 | `.agents/tasks/20260917-tool-call-detail-ui-review.md`（commit `60165cf`） |
+
+- claude 首次启动时停在「是否信任该目录」提示（该 worktree 由本批新建），Integrator 选择信任后达到 `interactive_ready`。
+- 契约覆盖七个重点：白名单可否被畸形 `details` 绕过、解析器会否输出错值（含 `read` marker 两份正则一致性）、bridge 手抄副本漂移、前端只读性与外链安全、范围与既有行为不变、复现 flaky 测试、六种降级路径。
+- 已发送 prompt 并通过 `herdr agent get` 确认 `working`，Integrator 停止等待并交回控制。
+
 ## 未决事项
 
+- Reviewer findings 待裁决（accepted → 退回 Worker 修复；blocking → 修复且复审后才能集成）。
+- 一次未能复现的测试失败（`1 failed | 176 passed`）：需在集成态多轮复跑；若再次出现应定位根因后再合入。
 - 真实浏览器视觉验收（diff 配色、行号对齐、长内容折叠、匹配列表分组）预计仍需授权后在隔离环境执行。
-- `main` 当前领先 `origin/main`；本批新增两个 docs commit（`4b549a1`、本记录），未推送。
+- `main` 当前领先 `origin/main`；本批新增三个 docs commit（`4b549a1`、`29e85c2`、本记录），未推送。
