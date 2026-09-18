@@ -67,7 +67,7 @@
 | Review 分支 | `review-20260917-tool-call-detail-ui`（base = Worker HEAD `04ed530`） |
 | Review worktree | `/Users/chiyizi/.herdr/worktrees/herzi/review-20260917-tool-call-detail-ui` |
 | Herdr | workspace `w1A` / pane `w1A:p1` |
-| Reviewer agent | `herzi_toolreview`（`--kind claude`，与 Worker 不同模型以获得交叉视角） |
+| Reviewer agent | `herzi_toolreview`（**`--kind pi`**，与 Worker 一致；曾误用 claude，已纠正，见下） |
 | Review 契约 | `.agents/tasks/20260917-tool-call-detail-ui-review.md`（commit `60165cf`） |
 
 - claude 首次启动时停在「是否信任该目录」提示（该 worktree 由本批新建），Integrator 选择信任后达到 `interactive_ready`。
@@ -80,6 +80,13 @@
 - 处理：在同一 pane 用相同名称重启（`herdr agent start herzi_toolreview --kind claude --pane w1A:p1`），claude 未再询问目录信任（已持久化），`interactive_ready: true`。
 - 重新发送同一份 review prompt（并在开头说明「上一进程被意外关闭，无部分结果，从零开始」）；`herdr agent get` 确认 `working`。
 - 未新建 worktree、未改契约、未动产品代码。
+
+### 纠正：Reviewer 改回 `pi`（2026-09-18，开发者指出）
+
+- **偏离**：首次派发时，Integrator 自行选择了 `--kind claude`，理由是「与 Worker 不同模型可获得交叉视角」。开发者指出项目一直使用 pi。
+- **为什么是错的**：项目迭代至今所有 Worker/Reviewer 均为 pi；擅自换 agent kind 使审查环境、工具集与验证口径与 Worker 不一致，findings 的可复现性下降；且属于未先征得同意的自主决定。
+- **处理**：核实 review worktree 仍 clean、review 文件未被改写（claude 未留下任何成果）→ 两次 `ctrl+c` 只中断了回合未退出进程 → 用 `herdr pane run w1A:p1 "/exit"` 退出 claude → 在同一 pane 以 `--kind pi` 重启 `herzi_toolreview` 并重发同一份 prompt → 确认 `working`。
+- **规则固化**：已在 [`docs/agent-collaboration-workflow.md`](../../docs/agent-collaboration-workflow.md) 的 Reviewer 小节加上「agent 种类默认与 Worker 一致」的要求。
 
 ## 未决事项
 
