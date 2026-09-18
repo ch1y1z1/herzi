@@ -224,7 +224,11 @@ npm run build
 
 ---
 
-# Review findings 处置（Worker，2026-09-18）
+# Review findings 处置（2026-09-18）
+
+> 署名更正：本节与 `c318d86`、`c4e3f8f` 两个返修 commit 是**主控代修**，不是 Worker 自己修的。
+> 流程偏离：findings 应「退回原 Worker」修复；开发者确认保留这些代修 commit 并直接交独立复核，
+> 因此这里如实记录为「主控代修 + 交复核」，而不是 Worker 的返修交付。
 
 独立 Reviewer 的评审记录在 review 分支：`.agents/tasks/20260917-tool-call-detail-ui-review.md`（对象 = 我的 `04ed530`），结论**需修复后合入**，6 条 finding。开发者要求我逐条**自行复现验证**后处置。以下每条都先独立复现（`/tmp` 临时脚本，未入库），再决定修或不修；修复后的复验证据一并列在下面。
 
@@ -232,7 +236,7 @@ npm run build
 | --- | --- | --- | --- |
 | 1 | medium | **成立** | 已修：`ToolDetail` 在 `item.isError` 时一律走 Arguments/Error 通用详情 |
 | 2 | medium | **成立** | 已修：diff 增加单行 + 合计字符上限；`boundedStringArray` 逐项裁剪；bridge 同步 + parity 用例 |
-| 3 | low | **成立**（新增路径部分） | 已修：`toolViewFor` 与 `TodoView` 的动作词查找改为 `Object.hasOwn` |
+| 3 | low | **成立**（既有路径 + 新增路径） | 已修：`toolViewFor` 与 `TodoView` 的动作词查找改为 `Object.hasOwn`；开发者 2026-09-18 决定**扩本批范围**，既有 `toolCatalog` 的三处表查找也一并修（见下） |
 | 4 | low | **成立**（①已修，②不可修） | 已修：`ffgrep` 单行去掉尾部 `\r`；②文件名为 `12:foo.ts` 的歧义属固有歧义，改为记录 + 文档化 |
 | 5 | info | **成立** | 已修：代码注释与本记录第 7 条改为实现的实际语义 |
 | 6 | info | **成立** | 已修：结果条目保留原文编号（`<li value>`），部分切分时计数文案改为「切分出 N 条结果（其余文字保留在原文中）」 |
@@ -267,8 +271,20 @@ npm run build
 | 5 | 只读复现脚本（`/tmp`，未入库） | **PASS** | 6 条 finding 的复现与修复后复验证据见上 |
 | 6 | 真实浏览器 / 真实 Pane / 真实 session 验收 | **NOT RUN** | 仍不授权；未读取任何真实 session |
 
+## 扩范围返修：`toolCatalog` 表查找（2026-09-18，开发者授权）
+
+- **授权**：开发者对「既有代码里病态工具名可让整个 ChatView 渲染失败」选择「现在扩范围修掉」，因此本批后续包含 `src/web/toolCatalog.ts` 与其测试（原契约 §3 的 write set 未含 `toolCatalog.test.ts`，本次为**开发者明确授权**的范围扩大）。
+- **修前实测**（当前代码 `describeToolCall`，即折叠行与组头所用函数）：
+  - `constructor` / `toString` → 不抛错但 `action`/`target` 双双 `undefined`，**折叠行整行空白**，计数变 `""`；
+  - `__proto__` → `TypeError: describer is not a function`；
+  - `hasOwnProperty` / `valueOf` → `TypeError: Cannot convert undefined or null to object`；
+  - 后三种在渲染期抛错，而 `src/web` 内无 ErrorBoundary → **整个 ChatView 渲染失败**。
+- **修法**：新增 `tableLookup(table, key)`（`Object.hasOwn` 守卫）并用于 `TOOL_META` / `TOOL_DESCRIBERS` / `TODO_ACTIONS`；`TODO_ACTIONS` 收回导出，改为导出带守卫的 `todoActionLabel(action)`，`TodoView` 复用它（避免调用方绕过守卫）。
+- **修后实测**：`constructor` / `toString` / `__proto__` / `hasOwnProperty` / `valueOf` 五个名字全部走「未知工具」回退（`action` = 工具名、`target` 正常、计 `1 步`），无抛错。
+- 对真实工具名零行为变化（`Object.hasOwn` 对表中所有真实键都为真）。新增测试在 `src/web/toolCatalog.test.ts` 与 `src/web/toolViews/views.test.tsx`。
+
 ## 仍未处置 / 需 Reviewer 复核
 
-- Finding 3 中 `toolCatalog.ts`（`TOOL_META`/`TOOL_DESCRIBERS`/`TODO_ACTIONS`）的同类原型链查找**本批未改**（既有代码 + 契约禁止改折叠行路径），建议另开小任务。
+- Finding 3 的既有 `toolCatalog` 部分已按开发者决定在本批修掉（见上），不再留在后续小任务。
 - Finding 4 的 ②（文件名为 `12:foo.ts`）**作为固有歧义接受**，已在代码注释与本记录说明；如开发者认为需要更强规则，请指定期望语义（例如「含 `:` 的头行一律当路径」会反过来把匹配行误判成路径）。
 - 上一轮那次未能复现的测试失败仍无新证据；本轮 4 文件命令与 `npm test` 各 1 次通过。

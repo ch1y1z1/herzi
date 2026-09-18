@@ -8,7 +8,7 @@
  * fallback), or the raw Arguments/Result detail when there is nothing to report.
  */
 
-import { TODO_ACTIONS } from "../toolCatalog";
+import { todoActionLabel } from "../toolCatalog";
 import { todoChange, todoStatusLabel, type TodoChange } from "./toolText";
 import { ViewMeta, ViewNote, type ToolViewProps } from "./common";
 
@@ -41,16 +41,13 @@ export function TodoView({ item, fallback }: ToolViewProps) {
 }
 
 /**
- * Action word for the card header.
- *
- * The lookup is own-property only: `action` can come from `details.action`, and
- * a value like `constructor` would otherwise return an inherited member (a
- * function) that React refuses to render as a child. An unknown action is shown
- * verbatim — the raw word is still a fact about the call.
+ * Action word for the card header: the catalog's label when the action is known,
+ * the raw word otherwise (it is still a fact about the call). The guarded
+ * lookup lives in the catalog, so a `details.action` like `constructor` cannot
+ * return an inherited member.
  */
 function todoActionWord(action: string | undefined): string | undefined {
-  if (!action) return undefined;
-  return Object.hasOwn(TODO_ACTIONS, action) ? TODO_ACTIONS[action] : action;
+  return todoActionLabel(action) ?? action;
 }
 
 function changeRows(change: TodoChange): Array<{ key: string; value: string }> {
