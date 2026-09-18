@@ -226,7 +226,8 @@ npm run build
 
 # Review findings 处置（2026-09-18）
 
-> 署名更正：本节与 `c318d86`、`c4e3f8f` 两个返修 commit 是**主控代修**，不是 Worker 自己修的。
+> 署名更正：本节与 `c318d86`、`981c27a` 两个返修 commit 是**主控代修**，不是 Worker 自己修的。
+> （记录更正 2026-09-18：原文此处写作 `c4e3f8f`，该对象在仓库中不存在（`git cat-file` 报 not a valid object name）；实际第二个代修 commit 是 `981c27a`。由 Integrator 在集成时逐 commit 核对修正。）
 > 流程偏离：findings 应「退回原 Worker」修复；开发者确认保留这些代修 commit 并直接交独立复核，
 > 因此这里如实记录为「主控代修 + 交复核」，而不是 Worker 的返修交付。
 

@@ -661,3 +661,32 @@ F4、F6、F7、F8、F9（路由/dedupe 测试部分）、F10、F11 与 I1–I6 �
 - `npm run build`：PASS（仅既有 chunk size warning）。
 - 两条回归测试（F1、F5）在修复前实测 FAIL、修复后 PASS。
 - 真实 Pi/Herdr Pane 验收仍为 **NOT RUN**。
+
+## 2026-09-18：工具调用专属展开视图（tool detail views）
+
+来源：`docs/tool-call-detail-ui-plan.md` 的 P0–P2.5；单 Worker 批次 + 两轮独立 review（详见 `.agents/tasks/20260917-tool-call-detail-ui-batch.md`）。
+
+### 交付
+
+- **协议**（`src/shared/protocol.ts`）：新增 `ChatToolDisplay` / `ChatDiffLine` / `ChatQuestionAnswer` 与 tool-call part 的可选 `display`；`result` 语义不变。
+- **服务端**（`src/server/pi-session-reader.ts`）：白名单投影（`edit.details.diff` 解析为行数组、`truncation`、`read` 尾部摘要 range、搜索计数、`todo`/`ask_user_question` 字段），逐字段形状校验 + 体积上限；`integrations/pi/extensions/herzi-bridge.ts` 实时路径产出同一结构（parity 对拍 11 组形状）。
+- **前端**（新增 `src/web/toolViews/`）：8 个视图覆盖 10 个工具 —— `DiffView`、`CodeView`（`read`/`write`）、`OutputView`、`MatchListView`（`ffgrep`/`fffind`）、`WebSearchView`、`WebFetchView`、`TodoView`、`QuestionView`；未注册或解析失败回退既有 `Arguments`/`Result`。
+- 折叠行、分组规则、`Worked for` 结构未改。
+
+### Review 与修复
+
+- 第一轮（独立 Reviewer）：6 条 finding —— F1 medium（失败调用未降级）、F2 medium（投影体积上限）、F3 low（原型链查找）、F4 low（`ffgrep` 边界）、F5/F6 info；结论「需修复后合入」。
+- 修复：`c318d86`（关闭 F1/F2/F4①/F5/F6 与 F3 新增路径）、`981c27a`（开发者授权扩范围：既有 `toolCatalog` 三处表查找加 `Object.hasOwn` 守卫 —— 病态工具名（`constructor`/`__proto__` 等）此前可让折叠行整行空白，或抛错使整个 `ChatView` 渲染失败）。
+- 第二轮（独立 Reviewer）：结论 **可合入**，只新增 1 条 low（F6 修复引入的重复 React key）。
+- 集成时由 Integrator 修 F6：`6167cc6`（key 加索引；`value` 仅在正整数时输出），并做回退验证（回退 → 新测试捕获 duplicate-key 警告；恢复 → PASS）。
+
+### 验证（main `6167cc6`）
+
+- `npm run typecheck` PASS；`npm test` PASS（17 files / **264 tests**）；`npx vitest run --sequence.shuffle` PASS（264/264）；`npm run build` PASS（仅既有 chunk 警告）。
+- 第一轮遗留的一次未复现 flaky（`1 failed | 176 passed`）在二轮 19 次聚焦 + 3 轮全量、集成态 2 轮全量中均未复现。
+- 真实浏览器与真实 Pane 验收 **NOT RUN**（未授权）；P3（宿主文件读取 / 「查看完整输出」）**未实现**，另起一批。
+
+### 已知限制
+
+- `display` 逐字段有上限，但整体无累计预算：`ask_user_question` 的 `answers` 嵌套相乘理论上界约 4.3 MB（真实数据 1–4 题，不可达）。
+- bridge 投影是手抄副本（扩展为独立安装包，无法 import 仓库代码），parity 测试只覆盖纯函数层。

@@ -88,9 +88,41 @@
 - **处理**：核实 review worktree 仍 clean、review 文件未被改写（claude 未留下任何成果）→ 两次 `ctrl+c` 只中断了回合未退出进程 → 用 `herdr pane run w1A:p1 "/exit"` 退出 claude → 在同一 pane 以 `--kind pi` 重启 `herzi_toolreview` 并重发同一份 prompt → 确认 `working`。
 - **规则固化**：已在 [`docs/agent-collaboration-workflow.md`](../../docs/agent-collaboration-workflow.md) 的 Reviewer 小节加上「agent 种类默认与 Worker 一致」的要求。
 
-## 未决事项
+## 集成与集成态验证（2026-09-18，开发者批准）
 
-- Reviewer findings 待裁决（accepted → 退回 Worker 修复；blocking → 修复且复审后才能集成）。
-- 一次未能复现的测试失败（`1 failed | 176 passed`）：需在集成态多轮复跑；若再次出现应定位根因后再合入。
-- 真实浏览器视觉验收（diff 配色、行号对齐、长内容折叠、匹配列表分组）预计仍需授权后在隔离环境执行。
-- `main` 当前领先 `origin/main`；本批新增三个 docs commit（`4b549a1`、`29e85c2`、本记录），未推送。
+**背景（流程偏离，如实记录）**：开发者曾误把另一个 agent 当成主控，该 agent 随后执行了「处置第一轮 findings（自行代修 `c318d86`、`981c27a`）→ 派发第二轮 review（`herzi_toolrereview`，w1B）」这一段流程；它**未改动 `main`**。Integrator（本会话）在开发者要求下核查现状，并从 git 与项目文件重建事实，修正了两处记录问题：
+
+- `.agents/tasks/20260917-tool-call-detail-ui.md` 原写「`c318d86`、`c4e3f8f` 两个返修 commit」，但 `c4e3f8f` 在仓库中不存在；实际为 `c318d86` + `981c27a`。已在该文件内更正并加注。
+- 该 agent 未更新本批次记录，本节由 Integrator 补齐。
+
+**开发者决定（2026-09-18）**：F6-low 由 Integrator 直接修（不回退 Worker）；现在集成到本地 `main`（含两份 review 记录）；不 push。
+
+**集成步骤**：
+
+1. `git merge --no-ff review-20260917-tool-call-detail-ui-r2` → `8439923`，无冲突。已核实 r2 分支包含全部交付（`c06e4c4`、`0cc3bea`、`04ed530`、`c318d86`、`981c27a`）与两轮 review 记录（`90d76e9`、`14329dc`、`cc8e9a0`）。
+2. 集成后修 F6：`6167cc6`（`WebSearchView` 的 key 加索引；`value` 仅在正整数时输出），新增测试。
+3. 文件记录修正：笔误 + 本节 + `docs/README.md` / `docs/development-log.md` / 方案 §8。
+
+**F6 可证伪验证**：回退 `key` 到 `entry.number` → 新测试失败并捕获 React「Encountered two children with the same key」；恢复修复 → 通过。
+
+**集成态验证（main `6167cc6`）**：
+
+| 命令 | 结果 | 说明 |
+| --- | --- | --- |
+| `npm run typecheck` | **PASS** | 无输出，exit 0 |
+| `npm test` | **PASS** | 17 files / **264 tests** |
+| `npx vitest run --sequence.shuffle` | **PASS** | 264/264（随机顺序） |
+| `npm run build` | **PASS** | server + web 成功（`✓ built in 499ms`），仅既有 chunk 警告 |
+| 真实浏览器验收 | **NOT RUN** | 未授权 |
+| 真实 Pane / session 验收 | **NOT RUN** | 未授权；本批未读取任何真实 session |
+
+第一轮遗留的未复现 flaky：二轮 review 19 次聚焦 + 3 轮全量未复现，集成态 2 轮全量（含 shuffle）亦未复现。
+
+## 未决事项（集成后）
+
+- **等开发者最终批准**：已合入本地 `main`，**未 push**。
+- 三条 `info` 不阻塞，其中「`display` 缺整体累计体积预算（理论上界约 4.3 MB）」已写入方案 §8 已知限制。
+- 真实浏览器视觉验收未做（diff 配色、行号对齐、长内容折叠、匹配列表分组）。
+- P3（宿主文件读取 / 「查看完整输出」）未实现，未开批次。
+- 资源待清理（需批准后进行）：worktree `agent-20260917-tool-call-detail-ui`（w19）、`review-20260917-tool-call-detail-ui`（w1A）、`review-20260917-tool-call-detail-ui-r2`（w1B）与 agent `herzi_toolviews` / `herzi_toolreview` / `herzi_toolrereview`，以及三个分支。
+- `main` 领先 `origin/main` 共 9 个 commit（5 个既有文档 + 本批），未推送。
