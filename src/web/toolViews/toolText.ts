@@ -324,6 +324,150 @@ export function truncationSummary(
   return `输出被截断${by}${total}${output}`;
 }
 
+export interface AskQuestionOption {
+  label: string;
+  description?: string;
+}
+
+/** One question of an `ask_user_question` call, from the call's own `args`. */
+export interface AskedQuestion {
+  header?: string;
+  question?: string;
+  multiSelect?: boolean;
+  options: AskQuestionOption[];
+}
+
+/**
+ * `args.questions` of an `ask_user_question` call (1–4 questions, each with
+ * 2–4 options and an optional `multiSelect`).
+ *
+ * `undefined` means the arguments are not the shape this view understands; an
+ * empty list means the call asked nothing usable.
+ */
+export function parseAskedQuestions(
+  args: ChatJsonObject,
+): AskedQuestion[] | undefined {
+  const questions = Array.isArray(args.questions) ? args.questions : undefined;
+  if (!questions) return undefined;
+
+  const parsed: AskedQuestion[] = [];
+  for (const entry of questions) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return undefined;
+    const record = entry as Record<string, unknown>;
+    const question = nonEmptyString(record.question);
+    const header = nonEmptyString(record.header);
+    const options = parseOptions(record.options);
+    if (!question && !header && !options.length) continue;
+    parsed.push({
+      ...(header === undefined ? {} : { header }),
+      ...(question === undefined ? {} : { question }),
+      ...(typeof record.multiSelect === "boolean"
+        ? { multiSelect: record.multiSelect }
+        : {}),
+      options,
+    });
+  }
+  return parsed.length ? parsed : undefined;
+}
+
+function parseOptions(value: unknown): AskQuestionOption[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((entry): AskQuestionOption[] => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+    const record = entry as Record<string, unknown>;
+    const label = nonEmptyString(record.label);
+    if (label === undefined) return [];
+    const description = nonEmptyString(record.description);
+    return [{ label, ...(description === undefined ? {} : { description }) }];
+  });
+}
+
+/** What one `todo` call changed, merged from the projection and the arguments. */
+export interface TodoChange {
+  action?: string;
+  taskId?: number;
+  subject?: string;
+  status?: string;
+  activeForm?: string;
+  description?: string;
+  blockedBy?: number[];
+}
+
+/**
+ * Field-wise merge of the projected `details` values with the call's arguments.
+ *
+ * The projection wins when it has a field (it is what the tool reported), the
+ * argument is the fallback (it is what the call asked for). Neither is invented:
+ * a field present in neither stays absent.
+ */
+export function todoChange(
+  projected: ChatToolDisplay["todo"] | undefined,
+  args: ChatJsonObject,
+): TodoChange {
+  const blockedBy = projected?.blockedBy ?? numberFields(args.blockedBy);
+  return {
+    ...mergeField("action", projected?.action, nonEmptyString(args.action)),
+    ...mergeField("taskId", projected?.taskId, nonNegativeInteger(args.id)),
+    ...mergeField("subject", projected?.subject, nonEmptyString(args.subject)),
+    ...mergeField("status", projected?.status, nonEmptyString(args.status)),
+    ...mergeField("activeForm", projected?.activeForm, nonEmptyString(args.activeForm)),
+    ...mergeField(
+      "description",
+      projected?.description,
+      nonEmptyString(args.description),
+    ),
+    ...(blockedBy === undefined ? {} : { blockedBy }),
+  };
+}
+
+function mergeField<K extends keyof TodoChange>(
+  key: K,
+  projected: TodoChange[K] | undefined,
+  fromArgs: TodoChange[K] | undefined,
+): Pick<TodoChange, K> | Record<string, never> {
+  const value = projected ?? fromArgs;
+  return value === undefined ? {} : ({ [key]: value } as Pick<TodoChange, K>);
+}
+
+/**
+ * Chinese label for a `todo` status. The four known values match the wording of
+ * the composer's status bar; an unknown status is returned unchanged so the
+ * card still reports what the extension said.
+ */
+export function todoStatusLabel(status: string): string {
+  switch (status) {
+    case "pending":
+      return "待办";
+    case "in_progress":
+      return "进行中";
+    case "completed":
+      return "已完成";
+    case "deleted":
+      return "已删除";
+    default:
+      return status;
+  }
+}
+
+function nonEmptyString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value : undefined;
+}
+
+function nonNegativeInteger(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0
+    ? value
+    : undefined;
+}
+
+function numberFields(value: unknown): number[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const numbers = value.filter(
+    (entry): entry is number =>
+      typeof entry === "number" && Number.isSafeInteger(entry),
+  );
+  return numbers.length ? numbers : undefined;
+}
+
 function positiveInteger(value: unknown): number | undefined {
   return typeof value === "number" && Number.isSafeInteger(value) && value > 0
     ? value

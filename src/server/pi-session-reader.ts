@@ -7,6 +7,7 @@ import type {
   ChatJsonObject,
   ChatMessage,
   ChatPart,
+  ChatQuestionAnswer,
   ChatSnapshot,
   ChatTodosSnapshot,
   ChatToolDisplay,
@@ -629,6 +630,16 @@ export function projectToolDisplay(
     if (matchCount) display.matchCount = matchCount;
   }
 
+  if (toolName === "ask_user_question" && record) {
+    const question = projectQuestion(record);
+    if (question) display.question = question;
+  }
+
+  if (toolName === "todo" && record) {
+    const todo = projectTodoChange(record);
+    if (todo) display.todo = todo;
+  }
+
   return Object.keys(display).length > 0 ? display : undefined;
 }
 
@@ -737,6 +748,111 @@ function nonNegativeInteger(value: unknown): number | undefined {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0
     ? value
     : undefined;
+}
+
+/** Longest string copied out of `details`; longer values are clipped and marked. */
+const DISPLAY_STRING_MAX = 1_000;
+/** Longest array copied out of `details`; longer arrays are refused, not cut. */
+const DISPLAY_ARRAY_MAX = 64;
+
+/** A bounded non-empty string, with an explicit marker when it was clipped. */
+function boundedString(value: unknown): string | undefined {
+  if (typeof value !== "string" || !value.trim()) return undefined;
+  return value.length > DISPLAY_STRING_MAX
+    ? `${value.slice(0, DISPLAY_STRING_MAX)}…`
+    : value;
+}
+
+function boundedStringArray(value: unknown): string[] | undefined {
+  if (!Array.isArray(value) || value.length > DISPLAY_ARRAY_MAX) return undefined;
+  const strings = value.filter((entry): entry is string => typeof entry === "string");
+  return strings.length ? strings : undefined;
+}
+
+function boundedNumberArray(value: unknown): number[] | undefined {
+  if (!Array.isArray(value) || value.length > DISPLAY_ARRAY_MAX) return undefined;
+  const numbers = value.filter(
+    (entry): entry is number => typeof entry === "number" && Number.isSafeInteger(entry),
+  );
+  return numbers.length ? numbers : undefined;
+}
+
+/**
+ * `ask_user_question` result: the recorded answers and the cancelled flag.
+ *
+ * An answer entry whose shape is not recognised makes the whole list unusable
+ * (a partially listed questionnaire would misrepresent what was answered), but
+ * `cancelled` and `globalNote` are independent of it and are still projected.
+ */
+function projectQuestion(
+  record: ChatJsonObject,
+): ChatToolDisplay["question"] | undefined {
+  const answers = Array.isArray(record.answers) && record.answers.length <= DISPLAY_ARRAY_MAX
+    ? projectQuestionAnswers(record.answers)
+    : undefined;
+  const cancelled =
+    typeof record.cancelled === "boolean" ? record.cancelled : undefined;
+  const globalNote = boundedString(record.globalNote);
+  if (!answers && cancelled === undefined && globalNote === undefined) {
+    return undefined;
+  }
+  return {
+    answers: answers ?? [],
+    ...(cancelled === undefined ? {} : { cancelled }),
+    ...(globalNote === undefined ? {} : { globalNote }),
+  };
+}
+
+function projectQuestionAnswers(value: unknown[]): ChatQuestionAnswer[] | undefined {
+  const answers: ChatQuestionAnswer[] = [];
+  for (const entry of value) {
+    if (!isRecord(entry)) return undefined;
+    const questionIndex = nonNegativeInteger(entry.questionIndex);
+    const question = boundedString(entry.question);
+    const kind = boundedString(entry.kind);
+    const answer = boundedString(entry.answer);
+    const selected = boundedStringArray(entry.selected);
+    const notes = boundedString(entry.notes);
+    const projected: ChatQuestionAnswer = {
+      ...(questionIndex === undefined ? {} : { questionIndex }),
+      ...(question === undefined ? {} : { question }),
+      ...(kind === undefined ? {} : { kind }),
+      ...(answer === undefined ? {} : { answer }),
+      ...(selected === undefined ? {} : { selected }),
+      ...(notes === undefined ? {} : { notes }),
+    };
+    // An entry with nothing recognised carries no information; dropping it is
+    // not a loss, but it must not be counted as an answer either.
+    if (Object.keys(projected).length === 0) continue;
+    answers.push(projected);
+  }
+  // Nothing recognised means no answers were projected at all; an empty list
+  // would read as "the user answered nothing".
+  return answers.length ? answers : undefined;
+}
+
+/** `todo` result: the action and the parameters that describe this call. */
+function projectTodoChange(
+  record: ChatJsonObject,
+): ChatToolDisplay["todo"] | undefined {
+  const params = isRecord(record.params) ? record.params : undefined;
+  const action = boundedString(record.action);
+  const taskId = nonNegativeInteger(params?.id);
+  const subject = boundedString(params?.subject);
+  const status = boundedString(params?.status);
+  const activeForm = boundedString(params?.activeForm);
+  const description = boundedString(params?.description);
+  const blockedBy = boundedNumberArray(params?.blockedBy);
+  const todo: ChatToolDisplay["todo"] = {
+    ...(action === undefined ? {} : { action }),
+    ...(taskId === undefined ? {} : { taskId }),
+    ...(subject === undefined ? {} : { subject }),
+    ...(status === undefined ? {} : { status }),
+    ...(activeForm === undefined ? {} : { activeForm }),
+    ...(description === undefined ? {} : { description }),
+    ...(blockedBy === undefined ? {} : { blockedBy }),
+  };
+  return Object.keys(todo).length > 0 ? todo : undefined;
 }
 
 function toolResultValue(value: PiMessage["content"]): unknown {

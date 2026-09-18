@@ -75,6 +75,28 @@ export interface ChatDiffLine {
 }
 
 /**
+ * One recorded answer to an `ask_user_question` question.
+ *
+ * The extension's `details.answers` entries carry these keys (see
+ * `docs/chat-compaction-todo-askuser-plan.md` §3.1). Only the verified ones are
+ * projected; `kind` stays a plain string so an unknown future kind is still
+ * rendered instead of dropping the answer.
+ */
+export interface ChatQuestionAnswer {
+  /** Index into the call's `questions` array, when the answer reported one. */
+  questionIndex?: number;
+  question?: string;
+  /** `option` / `custom` / `multi` in observed data. */
+  kind?: string;
+  /** The single chosen label or the typed custom answer; absent when null. */
+  answer?: string;
+  /** Chosen labels for a multi-select question. */
+  selected?: string[];
+  /** Free-form note the user attached, when one was reported. */
+  notes?: string;
+}
+
+/**
  * Whitelisted, server-projected display metadata for one tool call.
  *
  * This is never the raw `details` object: only the fields below are copied
@@ -108,6 +130,33 @@ export interface ChatToolDisplay {
   };
   /** Match counters reported by the search tools (`ffgrep`/`fffind`). */
   matchCount?: { matched: number; files: number; hasMore?: boolean };
+  /**
+   * Answers of an `ask_user_question` call, from `details.answers` /
+   * `details.cancelled`. Without it the view can still show the questions and
+   * options (they are in `args`), but not what the user answered.
+   */
+  question?: {
+    answers: ChatQuestionAnswer[];
+    cancelled?: boolean;
+    globalNote?: string;
+  };
+  /**
+   * What one `todo` call changed, from `details.action` and the relevant
+   * `params` fields.
+   *
+   * Deliberately not the task list: `details.tasks` is the complete state, which
+   * the composer's status bar already shows. This card only answers "what did
+   * this call change".
+   */
+  todo?: {
+    action?: string;
+    taskId?: number;
+    subject?: string;
+    status?: string;
+    activeForm?: string;
+    description?: string;
+    blockedBy?: number[];
+  };
 }
 
 export interface ChatToolResultImage {

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   detectTruncationNote,
+  parseAskedQuestions,
   parseGrepText,
   parsePathList,
   parseWebFetchText,
@@ -10,6 +11,8 @@ import {
   resultLines,
   splitReadResult,
   tailLines,
+  todoChange,
+  todoStatusLabel,
   toolResultText,
   truncationSummary,
 } from "./toolText";
@@ -219,6 +222,73 @@ describe("detectTruncationNote", () => {
   it("ignores long paragraphs and text without a note", () => {
     expect(detectTruncationNote(`x${"y".repeat(300)} truncated`)).toBeUndefined();
     expect(detectTruncationNote("nothing to report")).toBeUndefined();
+  });
+});
+
+describe("parseAskedQuestions", () => {
+  it("reads the questions, their options and the multi-select flag", () => {
+    expect(
+      parseAskedQuestions({
+        questions: [
+          {
+            header: "Approach",
+            question: "Which one?",
+            multiSelect: true,
+            options: [
+              { label: "A", description: "first" },
+              { label: "B" },
+              { nope: true },
+            ],
+          },
+        ],
+      }),
+    ).toEqual([
+      {
+        header: "Approach",
+        question: "Which one?",
+        multiSelect: true,
+        options: [{ label: "A", description: "first" }, { label: "B" }],
+      },
+    ]);
+  });
+
+  it("refuses other shapes and empty input", () => {
+    expect(parseAskedQuestions({ questions: "Which one?" })).toBeUndefined();
+    expect(parseAskedQuestions({ questions: ["A?"] })).toBeUndefined();
+    expect(parseAskedQuestions({ questions: [] })).toBeUndefined();
+    expect(parseAskedQuestions({})).toBeUndefined();
+  });
+});
+
+describe("todoChange", () => {
+  it("prefers the projected values and falls back to the arguments", () => {
+    expect(
+      todoChange(
+        { action: "update", taskId: 3, status: "completed" },
+        { action: "update", id: 3, subject: "from args", blockedBy: [1] },
+      ),
+    ).toEqual({
+      action: "update",
+      taskId: 3,
+      subject: "from args",
+      status: "completed",
+      blockedBy: [1],
+    });
+  });
+
+  it("invents nothing when neither source has a field", () => {
+    expect(todoChange(undefined, {})).toEqual({});
+    expect(todoChange({ action: "list" }, { action: "list" })).toEqual({
+      action: "list",
+    });
+  });
+});
+
+describe("todoStatusLabel", () => {
+  it("maps the known statuses and keeps unknown ones readable", () => {
+    expect(todoStatusLabel("in_progress")).toBe("进行中");
+    expect(todoStatusLabel("completed")).toBe("已完成");
+    expect(todoStatusLabel("something-new")).toBe("something-new");
   });
 });
 

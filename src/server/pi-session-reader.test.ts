@@ -11,6 +11,9 @@ import {
   parseReadRangeSummary,
   projectToolDisplay,
 } from "./pi-session-reader.js";
+// The Pi extension is installed standalone and carries its own copy of the
+// projection; the parity test below is what keeps the two copies together.
+import { projectToolDisplay as projectToolDisplayBridge } from "../../integrations/pi/extensions/herzi-bridge.js";
 
 const testRoots: string[] = [];
 
@@ -863,6 +866,187 @@ describe("PiSessionReader tool display projection", () => {
 
     const snapshot = await new PiSessionReader().read("pane-1", sessionPath, false);
     expect(snapshot.messages[0]?.content[0]).not.toHaveProperty("display");
+  });
+
+  it("projects the answers of an ask_user_question result", async () => {
+    const sessionPath = await writeSession([
+      ...toolPair(
+        "q1",
+        null,
+        "2026-09-15T00:00:00.000Z",
+        "ask_user_question",
+        { questions: [{ question: "Which one?", header: "Pick" }] },
+        {
+          answers: [
+            {
+              questionIndex: 0,
+              question: "Which one?",
+              kind: "option",
+              answer: "First",
+              selected: ["First", "Second"],
+              notes: "a note",
+              preview: { huge: "payload" },
+            },
+          ],
+          cancelled: false,
+          globalNote: "global",
+          error: "not whitelisted",
+        },
+        "answered",
+      ),
+    ]);
+
+    const snapshot = await new PiSessionReader().read("pane-1", sessionPath, false);
+    const display = (
+      snapshot.messages[0]?.content[0] as { display?: Record<string, unknown> }
+    )?.display;
+    expect(display).toEqual({
+      question: {
+        answers: [
+          {
+            questionIndex: 0,
+            question: "Which one?",
+            kind: "option",
+            answer: "First",
+            selected: ["First", "Second"],
+            notes: "a note",
+          },
+        ],
+        cancelled: false,
+        globalNote: "global",
+      },
+    });
+  });
+
+  it("keeps only the cancelled flag when the answers are unrecognised", async () => {
+    const sessionPath = await writeSession([
+      ...toolPair(
+        "q1",
+        null,
+        "2026-09-15T00:00:00.000Z",
+        "ask_user_question",
+        { questions: [] },
+        { answers: [{ unknown: true }], cancelled: true },
+        "",
+      ),
+      ...toolPair(
+        "q2",
+        "q1-result",
+        "2026-09-15T00:00:10.000Z",
+        "ask_user_question",
+        { questions: [] },
+        { answers: "nope" },
+        "",
+      ),
+    ]);
+
+    const snapshot = await new PiSessionReader().read("pane-1", sessionPath, false);
+    expect((snapshot.messages[0]?.content[0] as { display?: unknown }).display).toEqual({
+      question: { answers: [], cancelled: true },
+    });
+    // An answers payload that is not an array is not a projection at all.
+    expect(snapshot.messages[1]?.content[0]).not.toHaveProperty("display");
+  });
+
+  it("projects what a todo call changed, not the task list", async () => {
+    const sessionPath = await writeSession([
+      ...toolPair(
+        "t1",
+        null,
+        "2026-09-15T00:00:00.000Z",
+        "todo",
+        { action: "update", id: 3, status: "completed" },
+        {
+          action: "update",
+          nextId: 9,
+          params: { id: 3, subject: "第三个任务", status: "completed" },
+          tasks: [
+            { id: 3, subject: "第三个任务", status: "completed" },
+            { id: 4, subject: "第四个任务", status: "pending" },
+          ],
+        },
+        "ok",
+      ),
+    ]);
+
+    const snapshot = await new PiSessionReader().read("pane-1", sessionPath, false);
+    const display = (
+      snapshot.messages[0]?.content[0] as { display?: Record<string, unknown> }
+    )?.display;
+    expect(display).toEqual({
+      todo: {
+        action: "update",
+        taskId: 3,
+        subject: "第三个任务",
+        status: "completed",
+      },
+    });
+    // The full task list stays out: the composer's status bar owns it.
+    expect(JSON.stringify(display)).not.toContain("第四个任务");
+  });
+});
+
+/**
+ * The Pi extension cannot import the reader, so its projection is a by-hand copy.
+ * This is the check that the copy still agrees with the canonical one.
+ */
+describe("bridge projection parity", () => {
+  const cases: Array<{ toolName: string; details: unknown; text: string }> = [
+    {
+      toolName: "edit",
+      details: {
+        diff: "+12 added\n- 9 removed\n  10 context\n      ...",
+        firstChangedLine: 12,
+        patch: "@@ -9,1 +12,1 @@",
+      },
+      text: "replaced",
+    },
+    {
+      toolName: "edit",
+      details: { diff: "@@ not a display diff" },
+      text: "replaced",
+    },
+    {
+      toolName: "read",
+      details: { truncation: { truncated: true, truncatedBy: "lines", outputLines: 3, totalLines: 20 } },
+      text: "body\n\n[Showing lines 1-3 of 20. Use offset=4 to continue.]",
+    },
+    {
+      toolName: "bash",
+      details: { truncation: { truncated: false }, fullOutputPath: "/tmp/x" },
+      text: "output",
+    },
+    { toolName: "ffgrep", details: { totalMatched: 4, totalFiles: 2, hasMore: true }, text: "src/a.ts\n1: x" },
+    { toolName: "ffgrep", details: { totalMatched: "4" }, text: "src/a.ts\n1: x" },
+    {
+      toolName: "ask_user_question",
+      details: { answers: [{ questionIndex: 0, kind: "custom", answer: "typed" }], cancelled: true },
+      text: "answered",
+    },
+    { toolName: "ask_user_question", details: { answers: [{ other: 1 }] }, text: "answered" },
+    {
+      toolName: "todo",
+      details: { action: "delete", params: { id: 7, blockedBy: [1, 2] } },
+      text: "ok",
+    },
+    { toolName: "todo", details: {}, text: "ok" },
+    { toolName: "web_search", details: { anything: true }, text: "results" },
+  ];
+
+  it("matches the reader projection for every shape", () => {
+    for (const testCase of cases) {
+      const fromReader = projectToolDisplay(
+        testCase.toolName,
+        testCase.details,
+        testCase.text,
+      );
+      const fromBridge = projectToolDisplayBridge(testCase.toolName, {
+        content: [{ type: "text", text: testCase.text }],
+        details: testCase.details,
+      });
+      expect(fromBridge, `${testCase.toolName}: ${JSON.stringify(testCase.details)}`)
+        .toEqual(fromReader);
+    }
   });
 });
 

@@ -2,18 +2,27 @@
 
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { ComponentType } from "react";
+
+import type { ChatJsonObject } from "../../shared/protocol";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { CodeView } from "./CodeView";
 import { DiffView } from "./DiffView";
 import { MatchListView } from "./MatchListView";
 import { OutputView } from "./OutputView";
+import { QuestionView } from "./QuestionView";
+import { TodoView } from "./TodoView";
 import { WebFetchView } from "./WebFetchView";
 import { WebSearchView } from "./WebSearchView";
 import { toolViewFor } from "./index";
 import type { ToolDetailItem, ToolViewProps } from "./common";
 
-afterEach(cleanup);
+afterEach(() => {
+  // Global stubs must never survive a failing assertion: the next test would
+  // then render against a half-replaced jsdom environment.
+  vi.unstubAllGlobals();
+  cleanup();
+});
 
 function fallback() {
   return <div className="test-fallback">raw arguments/result</div>;
@@ -69,7 +78,7 @@ describe("DiffView", () => {
   it("copies the diff lines as text", async () => {
     const writeText = vi.fn(async (_text: string) => undefined);
     vi.stubGlobal("navigator", { clipboard: { writeText } });
-    const container = renderView(DiffView, item);
+    renderView(DiffView, item);
 
     fireEvent.click(screen.getByRole("button", { name: "复制 diff" }));
 
@@ -78,8 +87,6 @@ describe("DiffView", () => {
       "+92 const added = true;\n-88 const added = false;\n 91 context line\n...",
     );
     await waitFor(() => expect(screen.getByText("已复制")).toBeTruthy());
-    expect(container).toBeTruthy();
-    vi.unstubAllGlobals();
   });
 
   it("falls back without a projected diff", () => {
@@ -378,12 +385,147 @@ describe("WebFetchView", () => {
   });
 });
 
+describe("TodoView", () => {
+  it("shows only what this call changed", () => {
+    const container = renderView(TodoView, {
+      toolName: "todo",
+      args: { action: "update", id: 3 },
+      display: {
+        todo: {
+          action: "update",
+          taskId: 3,
+          subject: "第三个任务",
+          status: "in_progress",
+          activeForm: "正在做第三个",
+        },
+      },
+    });
+
+    expect(screen.getByText("更新计划")).toBeTruthy();
+    expect(texts(container, ".change-key")).toEqual(["任务", "标题", "状态"]);
+    expect(texts(container, ".change-value")).toEqual([
+      "#3",
+      "第三个任务",
+      "进行中（正在做第三个）",
+    ]);
+    expect(container.querySelector(".test-fallback")).toBeNull();
+  });
+
+  it("falls back to the arguments when nothing was projected", () => {
+    const container = renderView(TodoView, {
+      toolName: "todo",
+      args: { action: "create", subject: "新任务", status: "pending" },
+    });
+
+    expect(screen.getByText("新增计划")).toBeTruthy();
+    expect(texts(container, ".change-value")).toEqual(["新任务", "待办"]);
+  });
+
+  it("falls back when the call carries neither action nor fields", () => {
+    const container = renderView(TodoView, { toolName: "todo", args: {} });
+    expect(container.querySelector(".test-fallback")).toBeTruthy();
+  });
+});
+
+describe("QuestionView", () => {
+  const args: ChatJsonObject = {
+    questions: [
+      {
+        header: "Approach",
+        question: "Which one?",
+        options: [{ label: "A", description: "first" }, { label: "B" }],
+      },
+      { header: "Second", question: "And this?", options: [{ label: "C" }] },
+    ],
+  };
+
+  it("shows the questions, marks the chosen option and the cancelled state", () => {
+    const container = renderView(QuestionView, {
+      toolName: "ask_user_question",
+      args,
+      display: {
+        question: {
+          answers: [
+            { questionIndex: 0, question: "Which one?", kind: "option", answer: "A" },
+            { questionIndex: 1, question: "And this?", kind: "custom", answer: "typed" },
+          ],
+          cancelled: false,
+          globalNote: "note",
+        },
+      },
+    });
+
+    expect(screen.getByText("2 个问题")).toBeTruthy();
+    expect(container.querySelectorAll(".question-item")).toHaveLength(2);
+    expect(container.querySelectorAll(".question-option")).toHaveLength(3);
+    expect(container.querySelectorAll(".question-option-chosen")).toHaveLength(1);
+    expect(texts(container, ".answer-value")).toEqual(["A", "typed"]);
+    expect(texts(container, ".answer-kind")).toEqual(["已选择", "自定义回答"]);
+    expect(screen.getByText("note")).toBeTruthy();
+    expect(container.textContent).not.toContain("没有回答");
+  });
+
+  it("reports a cancelled questionnaire without inventing answers", () => {
+    const container = renderView(QuestionView, {
+      toolName: "ask_user_question",
+      args,
+      display: { question: { answers: [], cancelled: true } },
+    });
+
+    expect(screen.getByText("用户取消了这次询问")).toBeTruthy();
+    expect(container.querySelectorAll(".question-item")).toHaveLength(2);
+    expect(texts(container, ".answer-value")).toEqual([]);
+    expect(container.querySelector(".test-fallback")).toBeNull();
+  });
+
+  it("still shows the questions when no answers were projected", () => {
+    const container = renderView(QuestionView, {
+      toolName: "ask_user_question",
+      args,
+    });
+
+    expect(screen.getByText("2 个问题")).toBeTruthy();
+    expect(texts(container, ".question-text")).toEqual([
+      "Which one?",
+      "And this?",
+    ]);
+    expect(screen.getByText("A")).toBeTruthy();
+  });
+
+  it("lists an answer that matches no question instead of attaching it", () => {
+    const container = renderView(QuestionView, {
+      toolName: "ask_user_question",
+      args,
+      display: {
+        question: {
+          answers: [{ kind: "custom", answer: "orphan" }],
+          cancelled: false,
+        },
+      },
+    });
+
+    expect(screen.getByText("其他回答")).toBeTruthy();
+    expect(screen.getByText("orphan")).toBeTruthy();
+    expect(texts(container, ".answer-value")).toEqual(["orphan"]);
+  });
+
+  it("falls back when there is neither a question nor an answer", () => {
+    const container = renderView(QuestionView, {
+      toolName: "ask_user_question",
+      args: {},
+    });
+    expect(container.querySelector(".test-fallback")).toBeTruthy();
+  });
+});
+
 describe("toolViewFor", () => {
   it("maps the registered tools and leaves unknown ones to the fallback", () => {
     expect(toolViewFor("edit")).toBe(DiffView);
     expect(toolViewFor("read")).toBe(CodeView);
     expect(toolViewFor("ffgrep")).toBe(MatchListView);
     expect(toolViewFor("web_fetch")).toBe(WebFetchView);
+    expect(toolViewFor("todo")).toBe(TodoView);
+    expect(toolViewFor("ask_user_question")).toBe(QuestionView);
     expect(toolViewFor("mcp__unknown_tool")).toBeUndefined();
     expect(toolViewFor("")).toBeUndefined();
   });

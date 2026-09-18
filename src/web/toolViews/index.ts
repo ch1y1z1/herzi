@@ -16,6 +16,8 @@ import { CodeView } from "./CodeView";
 import { DiffView } from "./DiffView";
 import { MatchListView } from "./MatchListView";
 import { OutputView } from "./OutputView";
+import { QuestionView } from "./QuestionView";
+import { TodoView } from "./TodoView";
 import { WebFetchView } from "./WebFetchView";
 import { WebSearchView } from "./WebSearchView";
 import type { ToolViewProps } from "./common";
@@ -29,6 +31,8 @@ const TOOL_VIEWS: Record<string, ComponentType<ToolViewProps>> = {
   fffind: MatchListView,
   web_search: WebSearchView,
   web_fetch: WebFetchView,
+  todo: TodoView,
+  ask_user_question: QuestionView,
 };
 
 export function toolViewFor(
@@ -38,4 +42,13 @@ export function toolViewFor(
 }
 
 export type { ToolDetailItem, ToolViewProps } from "./common";
-export { CodeView, DiffView, MatchListView, OutputView, WebFetchView, WebSearchView };
+export {
+  CodeView,
+  DiffView,
+  MatchListView,
+  OutputView,
+  QuestionView,
+  TodoView,
+  WebFetchView,
+  WebSearchView,
+};

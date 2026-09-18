@@ -1368,6 +1368,98 @@ describe("ChatView activity presentation", () => {
     );
   });
 
+  it("shows what one todo call changed", async () => {
+    stubChat(
+      [
+        userMessage(),
+        assistantMessage("a1", [
+          toolPart(
+            "call-todo",
+            "todo",
+            { action: "update", id: 3 },
+            {
+              result: "ok",
+              display: {
+                todo: {
+                  action: "update",
+                  taskId: 3,
+                  subject: "第三个任务",
+                  status: "completed",
+                },
+              },
+            },
+          ),
+          { type: "text", text: "done" },
+        ]),
+      ],
+      false,
+    );
+
+    render(<ChatView pane={pane} />);
+    await screen.findByText("done");
+
+    await waitFor(() => expect(document.querySelector(".todo-view")).toBeTruthy());
+    const detail = document.querySelector(".tool-detail") as HTMLElement;
+    expect(detail.querySelector(".tool-view-meta")?.textContent).toBe("更新计划");
+    expect(
+      Array.from(detail.querySelectorAll(".change-value")).map(
+        (element) => element.textContent,
+      ),
+    ).toEqual(["#3", "第三个任务", "已完成"]);
+  });
+
+  it("shows the questions and the recorded answer", async () => {
+    stubChat(
+      [
+        userMessage(),
+        assistantMessage("a1", [
+          toolPart(
+            "call-question",
+            "ask_user_question",
+            {
+              questions: [
+                {
+                  header: "Approach",
+                  question: "Which one?",
+                  options: [{ label: "A" }, { label: "B" }],
+                },
+              ],
+            },
+            {
+              result: "answered",
+              display: {
+                question: {
+                  answers: [
+                    {
+                      questionIndex: 0,
+                      question: "Which one?",
+                      kind: "option",
+                      answer: "A",
+                    },
+                  ],
+                  cancelled: false,
+                },
+              },
+            },
+          ),
+          { type: "text", text: "done" },
+        ]),
+      ],
+      false,
+    );
+
+    render(<ChatView pane={pane} />);
+    await screen.findByText("done");
+
+    await waitFor(() => expect(document.querySelector(".question-view")).toBeTruthy());
+    const detail = document.querySelector(".tool-detail") as HTMLElement;
+    expect(detail.querySelectorAll(".question-option")).toHaveLength(2);
+    expect(detail.querySelectorAll(".question-option-chosen")).toHaveLength(1);
+    expect(detail.querySelector(".answer-value")?.textContent).toBe("A");
+    // Read-only: no control to answer from the chat.
+    expect(detail.querySelector("button")).toBeNull();
+  });
+
   it("shows a thinking duration only when the transcript provides one", async () => {
     stubChat(
       [

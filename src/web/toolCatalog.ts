@@ -134,7 +134,7 @@ const PREVIEW_KEYS = [
  * （见该包的 `docs/tool-schema.md`）。真实会话里出现的是 create、update、
  * list、delete，因此这里按真实词表映射，不按猜测。
  */
-const TODO_ACTIONS: Record<string, string> = {
+export const TODO_ACTIONS: Record<string, string> = {
   create: "新增计划",
   update: "更新计划",
   get: "查看计划",
