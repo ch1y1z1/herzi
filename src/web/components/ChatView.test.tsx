@@ -10,6 +10,7 @@ import type {
   ChatMessage,
   ChatPart,
   ChatRealtimeState,
+  ChatToolDisplay,
   PaneSummary,
   PromptDeliveryEvent,
 } from "../../shared/protocol";
@@ -467,7 +468,7 @@ function toolPart(
   toolCallId: string,
   toolName: string,
   args: ChatJsonObject,
-  options: { result?: unknown; isError?: boolean } = {},
+  options: { result?: unknown; isError?: boolean; display?: ChatToolDisplay } = {},
 ): ChatPart {
   return {
     type: "tool-call",
@@ -476,6 +477,7 @@ function toolPart(
     args,
     ...(options.result !== undefined ? { result: options.result } : {}),
     ...(options.isError !== undefined ? { isError: options.isError } : {}),
+    ...(options.display !== undefined ? { display: options.display } : {}),
   };
 }
 
@@ -1140,6 +1142,230 @@ describe("ChatView activity presentation", () => {
 
     // An unknown tool counts as one neutral step, next to the real command.
     expect(cell(groupHeader(), ".activity-counts")).toBe("1 条命令、2 步");
+  });
+
+  it("renders the projected diff in an expanded edit row", async () => {
+    stubChat(
+      [
+        userMessage(),
+        assistantMessage("a1", [
+          toolPart(
+            "call-edit",
+            "edit",
+            { path: "src/a.ts" },
+            {
+              result: "… replaced 1 block(s) in src/a.ts",
+              display: {
+                diff: {
+                  firstChangedLine: 92,
+                  lines: [
+                    { kind: "add", lineNumber: 92, text: "const added = true;" },
+                    { kind: "remove", lineNumber: 88, text: "const added = false;" },
+                    { kind: "skip", text: "..." },
+                  ],
+                },
+              },
+            },
+          ),
+          { type: "text", text: "done" },
+        ]),
+      ],
+      false,
+    );
+
+    render(<ChatView pane={pane} />);
+    await screen.findByText("done");
+
+    await waitFor(() => expect(document.querySelector(".diff-view")).toBeTruthy());
+    const detail = document.querySelector(".tool-detail") as HTMLElement;
+    expect(detail.querySelectorAll(".diff-line-add")).toHaveLength(1);
+    expect(detail.querySelectorAll(".diff-line-remove")).toHaveLength(1);
+    expect(detail.querySelector(".diff-line-skip")).toBeTruthy();
+    expect(detail.querySelector(".diff-line-number")?.textContent).toBe("92");
+    // The diff replaces the generic detail; it is not rendered next to it.
+    expect(detail.querySelector("section")).toBeNull();
+  });
+
+  it("keeps the raw arguments and result when no display was projected", async () => {
+    stubChat(
+      [
+        userMessage(),
+        assistantMessage("a1", [
+          toolPart(
+            "call-edit",
+            "edit",
+            { path: "src/a.ts" },
+            { result: "… replaced 1 block(s) in src/a.ts" },
+          ),
+          { type: "text", text: "done" },
+        ]),
+      ],
+      false,
+    );
+
+    render(<ChatView pane={pane} />);
+    await screen.findByText("done");
+
+    await waitFor(() =>
+      expect(document.querySelector(".tool-detail section")).toBeTruthy(),
+    );
+    const detail = document.querySelector(".tool-detail") as HTMLElement;
+    expect(detail.querySelector(".diff-view")).toBeNull();
+    expect(detail.querySelectorAll("section label")[0]?.textContent).toBe(
+      "Arguments",
+    );
+    expect(detail.textContent).toContain("replaced 1 block(s)");
+  });
+
+  it("numbers a read result from the requested offset", async () => {
+    stubChat(
+      [
+        userMessage(),
+        assistantMessage("a1", [
+          toolPart(
+            "call-read",
+            "read",
+            { path: "src/a.ts", offset: 100 },
+            {
+              result: [
+                "first line",
+                "second line",
+                "",
+                "[Showing lines 100-101 of 9. Use offset=102 to continue.]",
+              ].join("\n"),
+              display: {
+                readRange: { from: 100, to: 101, total: 9, nextOffset: 102 },
+              },
+            },
+          ),
+          { type: "text", text: "done" },
+        ]),
+      ],
+      false,
+    );
+
+    render(<ChatView pane={pane} />);
+    await screen.findByText("done");
+
+    await waitFor(() => expect(document.querySelector(".code-view")).toBeTruthy());
+    const detail = document.querySelector(".tool-detail") as HTMLElement;
+    expect(
+      Array.from(detail.querySelectorAll(".code-line-number")).map(
+        (element) => element.textContent,
+      ),
+    ).toEqual(["100", "101"]);
+    expect(
+      Array.from(detail.querySelectorAll(".code-line-text")).map(
+        (element) => element.textContent,
+      ),
+    ).toEqual(["first line", "second line"]);
+    expect(detail.textContent).toContain("已显示 100–101 / 共 9 行");
+  });
+
+  it("shows the tail of a bash result and never claims an exit code", async () => {
+    const output = Array.from(
+      { length: 25 },
+      (_value, index) => `line ${index + 1}`,
+    ).join("\n");
+    stubChat(
+      [
+        userMessage(),
+        assistantMessage("a1", [
+          toolPart("call-bash", "bash", { command: "npm test" }, { result: output }),
+          { type: "text", text: "done" },
+        ]),
+      ],
+      false,
+    );
+
+    render(<ChatView pane={pane} />);
+    await screen.findByText("done");
+
+    await waitFor(() => expect(document.querySelector(".output-view")).toBeTruthy());
+    const detail = document.querySelector(".tool-detail") as HTMLElement;
+    expect(detail.querySelector(".output-command pre")?.textContent).toBe("npm test");
+    const shown = detail.querySelector(".output-body pre")?.textContent ?? "";
+    expect(shown).toContain("line 25");
+    expect(shown).not.toContain("line 1\n");
+    // The result text has no exit status, so the view must not show one.
+    expect(detail.textContent).not.toMatch(/退出码|exit code/iu);
+  });
+
+  it("uses the live projection while the JSONL result is still missing", async () => {
+    stubChat(
+      [
+        userMessage(),
+        assistantMessage(
+          "a1",
+          [toolPart("call-live", "bash", { command: "npm test" })],
+          { status: { type: "running" }, completedAt: undefined },
+        ),
+      ],
+      true,
+    );
+
+    const realtime: ChatRealtimeState = {
+      ...realtimeTick(1),
+      tools: [
+        {
+          toolCallId: "call-live",
+          toolName: "bash",
+          args: { command: "npm test" },
+          status: "complete",
+          result: "tail one\ntail two",
+          display: {
+            truncation: {
+              truncated: true,
+              by: "lines",
+              outputLines: 2,
+              totalLines: 50,
+            },
+          },
+        },
+      ],
+    };
+
+    render(<ChatView pane={pane} realtime={realtime} />);
+
+    await waitFor(() => expect(document.querySelector(".output-view")).toBeTruthy());
+    expect(document.querySelector(".tool-detail")?.textContent).toContain(
+      "输出被截断（达到行数上限），共 50 行，本次返回 2 行",
+    );
+  });
+
+  it("keeps an unknown tool on the raw detail even when it carries a display", async () => {
+    stubChat(
+      [
+        userMessage(),
+        assistantMessage("a1", [
+          toolPart(
+            "call-unknown",
+            "mcp__linear__create_issue",
+            { query: "fix build" },
+            {
+              result: "created",
+              display: {
+                diff: { lines: [{ kind: "add", lineNumber: 1, text: "x" }] },
+              },
+            },
+          ),
+          { type: "text", text: "done" },
+        ]),
+      ],
+      false,
+    );
+
+    render(<ChatView pane={pane} />);
+    await screen.findByText("done");
+
+    await waitFor(() =>
+      expect(document.querySelector(".tool-detail section")).toBeTruthy(),
+    );
+    const detail = document.querySelector(".tool-detail") as HTMLElement;
+    expect(detail.querySelector(".diff-view")).toBeNull();
+    expect(detail.querySelectorAll("section label")[0]?.textContent).toBe(
+      "Arguments",
+    );
   });
 
   it("shows a thinking duration only when the transcript provides one", async () => {

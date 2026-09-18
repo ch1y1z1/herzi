@@ -475,7 +475,11 @@ function describeWebFetch(args: ChatJsonObject): ToolDescriptor {
   return { action: "抓取网页", target: webHost(url), fullTarget: url };
 }
 
-function webHost(url: string): string {
+/**
+ * Host of a URL, used as the collapsed row's target and by the `web_fetch`
+ * detail view. Falls back to the clipped URL when it does not parse as one.
+ */
+export function webHost(url: string): string {
   try {
     const host = new URL(url).hostname;
     return host || clipText(url, TARGET_LIMIT);
