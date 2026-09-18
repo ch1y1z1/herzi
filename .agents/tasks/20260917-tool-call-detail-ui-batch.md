@@ -118,11 +118,28 @@
 
 第一轮遗留的未复现 flaky：二轮 review 19 次聚焦 + 3 轮全量未复现，集成态 2 轮全量（含 shuffle）亦未复现。
 
+## 清理记录（2026-09-18，开发者指示）
+
+**前置核实**：
+
+- 三个 worktree 均 clean（`git status --porcelain` 为空）。
+- `git cherry main <branch>` 无 `+` 项：三个分支的 commit patch 均已在 main。
+- `review-20260917-tool-call-detail-ui` 的 `git branch -d` 被拒（它的 2 个 commit 是通过 r2 分支的**等价 patch** 进入 main，而非直接 merge）；用 `git diff --name-status main <branch> | grep '^A'` 确认**没有 main 缺少的文件**，且 `git cherry -v` 对该分支两个 commit 均为 `-`，因此用 `-D` 删除并记录理由。
+
+**执行**：
+
+- 退出三个 agent：`herdr pane send-keys <pane> ctrl+d`（pi 的 `app.exit`）。注意：先前误用 `/exit` 被 pi 当成了对话输入（其中一个 agent 因此跑了一轮才停），已纠正。
+- 删除三个 worktree 的 gitignored `node_modules`/`dist`，再用 `herdr worktree remove --workspace <w>`（`forced: false`）移除（w19 / w1A / w1B 均返回 `worktree_removed`）。
+- `git branch -d` 删除 `agent-20260917-tool-call-detail-ui`（was `981c27a`）与 `review-20260917-tool-call-detail-ui-r2`（was `cc8e9a0`）；`git branch -D` 删除 `review-20260917-tool-call-detail-ui`（was `e67a6bc`）。
+- 清理 `/tmp` 中本项目遗留的调试产物 **14 项、约 8.2MB**（`herzi-check.ts`、`herzi-explain-toolcatalog.ts`、`herzi-fix-npmci.log`、`herzi-f1f2-prefix`、`herzi-fix3-*`、`herzi-landmarks-*.json`、`herzi-order-base` 等，时间跳度 2026-09-17 18:27–09-18 14:14）。这些**不是**本会话创建的，看名称与时间应是代修 findings 与更早批次留下的验证产物；已全部删除。
+
+**结果**：worktree / 分支 / agent 只剩 `main` 与本批 `agent-20260918-tool-views-rev2`（workspace `w1C`，agent `herzi_viewrev2` 仍在 `working`）。Herdr 工作区只剩 `wT`（general）、`wW`（herzi）、`w1C`（本批）。上一批交付全部在 main，未丢失。
+
 ## 未决事项（集成后）
 
 - **等开发者最终批准**：已合入本地 `main`，**未 push**。
 - 三条 `info` 不阻塞，其中「`display` 缺整体累计体积预算（理论上界约 4.3 MB）」已写入方案 §8 已知限制。
-- 真实浏览器视觉验收未做（diff 配色、行号对齐、长内容折叠、匹配列表分组）。
+- 真实浏览器视觉验收未做（diff 配色、行号对齐、长内容折叠、匹配列表分组）；本批的 Rev.2 将改变这部分形态（见 [`20260918-tool-views-rev2-batch.md`](./20260918-tool-views-rev2-batch.md)），应在 Rev.2 之后一并验收。
 - P3（宿主文件读取 / 「查看完整输出」）未实现，未开批次。
-- 资源待清理（需批准后进行）：worktree `agent-20260917-tool-call-detail-ui`（w19）、`review-20260917-tool-call-detail-ui`（w1A）、`review-20260917-tool-call-detail-ui-r2`（w1B）与 agent `herzi_toolviews` / `herzi_toolreview` / `herzi_toolrereview`，以及三个分支。
+- 本批 worktree / 分支 / agent 已于 2026-09-18 清理完毕（见上）。
 - `main` 领先 `origin/main` 若干 commit（含本批全部实现与两轮 review 记录），**未推送**。
