@@ -959,6 +959,321 @@ button {
   word-break: break-word;
 }
 
+/*
+ * Tool detail views (`src/web/toolViews/`).
+ *
+ * The collapsed rows, the group headers and the `tool-detail` panel itself keep
+ * their existing styling; only the content inside a view is styled here. Long
+ * content is folded in the view (with an explicit line count) instead of being
+ * put behind an inner scrollbar, hence the `max-height: none` override for
+ * view `<pre>` elements.
+ */
+.tool-view {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+}
+
+.tool-view pre {
+  max-height: none;
+  overflow: visible;
+}
+
+.tool-view-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.tool-view-note {
+  color: #7d8279;
+  font-size: 10.5px;
+}
+
+.tool-view-action {
+  margin-left: auto;
+  padding: 1px 8px;
+  border: 1px solid #d5d9cf;
+  border-radius: 999px;
+  color: #70756d;
+  background: #e9ece5;
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.tool-view-action:hover {
+  border-color: #c2c8bc;
+  color: #5e635a;
+}
+
+.tool-view .markdown-body {
+  font-size: 12px;
+}
+
+.diff-body,
+.code-body {
+  display: grid;
+  font-family: "SFMono-Regular", Menlo, monospace;
+  font-size: 10.5px;
+  line-height: 1.55;
+}
+
+.diff-line,
+.code-line {
+  display: flex;
+  gap: 7px;
+  min-width: 0;
+}
+
+.code-line {
+  min-height: 1.55em;
+}
+
+.diff-line-number,
+.code-line-number,
+.match-line-number {
+  flex: 0 0 auto;
+  min-width: 2.6em;
+  color: #a2a79c;
+  text-align: right;
+  user-select: none;
+}
+
+.diff-line-marker {
+  flex: 0 0 auto;
+  width: 1ch;
+}
+
+.diff-line-text,
+.code-line-text,
+.match-line-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: #5e635a;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.diff-line-add {
+  background: #e8f0e2;
+}
+
+.diff-line-add .diff-line-marker,
+.diff-line-add .diff-line-text {
+  color: #4d6b3f;
+}
+
+.diff-line-remove {
+  background: #f6e8e7;
+}
+
+.diff-line-remove .diff-line-marker,
+.diff-line-remove .diff-line-text {
+  color: #8d4b47;
+}
+
+.diff-line-skip {
+  margin: 2px 0;
+  border-top: 1px dashed #d5d9cf;
+  border-bottom: 1px dashed #d5d9cf;
+}
+
+.diff-line-skip .diff-line-text {
+  color: #a2a79c;
+}
+
+.output-view {
+  gap: 9px;
+}
+
+.output-command,
+.output-body {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.match-body {
+  display: grid;
+  gap: 7px;
+}
+
+.match-file {
+  display: grid;
+  gap: 1px;
+  min-width: 0;
+}
+
+.match-file-path {
+  color: #70756d;
+  font-family: "SFMono-Regular", Menlo, monospace;
+  font-size: 10.5px;
+  font-weight: 600;
+  word-break: break-word;
+}
+
+.match-line {
+  display: flex;
+  gap: 6px;
+  min-width: 0;
+}
+
+.match-line-number,
+.match-line-text {
+  font-family: "SFMono-Regular", Menlo, monospace;
+  font-size: 10.5px;
+  line-height: 1.55;
+}
+
+.match-line-context .match-line-text {
+  color: #9aa094;
+}
+
+.match-line-context .match-line-number {
+  color: #b7bcb2;
+}
+
+.path-list {
+  display: grid;
+  gap: 1px;
+  color: #5e635a;
+  font-family: "SFMono-Regular", Menlo, monospace;
+  font-size: 10.5px;
+  line-height: 1.55;
+  word-break: break-all;
+}
+
+.result-list {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding-left: 1.6em;
+}
+
+.result-item {
+  color: #3d413b;
+}
+
+.change-list {
+  display: grid;
+  gap: 3px;
+}
+
+.change-row {
+  display: flex;
+  gap: 8px;
+  min-width: 0;
+}
+
+.change-key {
+  flex: 0 0 auto;
+  min-width: 3.2em;
+  color: #969a91;
+}
+
+.change-value {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: #5e635a;
+  word-break: break-word;
+}
+
+.question-view {
+  gap: 10px;
+}
+
+.question-item {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.question-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.question-header {
+  padding: 1px 7px;
+  border-radius: 999px;
+  color: #667959;
+  background: #e5ebdd;
+  font-size: 10px;
+}
+
+.question-multi {
+  color: #969a91;
+  font-size: 10px;
+}
+
+.question-text {
+  color: #3d413b;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.question-options {
+  display: grid;
+  gap: 3px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.question-option {
+  display: flex;
+  gap: 7px;
+  min-width: 0;
+  padding: 2px 7px;
+  border-radius: 5px;
+  color: #5e635a;
+  background: #ebece6;
+}
+
+.question-option-chosen {
+  color: #4d6b3f;
+  background: #e2ebda;
+}
+
+.question-option-label {
+  flex: 0 0 auto;
+  font-weight: 500;
+}
+
+.question-option-description {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: #8b9087;
+  font-size: 11px;
+}
+
+.answer-list {
+  display: grid;
+  gap: 2px;
+}
+
+.answer-line {
+  display: flex;
+  gap: 7px;
+  min-width: 0;
+}
+
+.answer-kind {
+  flex: 0 0 auto;
+  color: #969a91;
+  font-size: 10.5px;
+}
+
+.answer-value {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: #3d413b;
+  font-size: 11.5px;
+  word-break: break-word;
+}
+
 .tool-result-images {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(150px, 240px));

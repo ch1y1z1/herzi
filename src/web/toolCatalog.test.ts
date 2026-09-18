@@ -10,6 +10,7 @@ import {
   editDiff,
   formatToolCounts,
   summarizeToolRun,
+  todoActionLabel,
   toolRunDiff,
   toolRunVerb,
   type ToolRunItem,
@@ -249,6 +250,50 @@ describe("describeToolCall degradation", () => {
     expect(editDiff({ edits: [{ oldText: "a" }] })).toBeUndefined();
     expect(editDiff({})).toBeUndefined();
     expect(describeToolCall("write", { path: "a.ts" }).diff).toBeUndefined();
+  });
+});
+
+describe("catalog table lookups", () => {
+  /**
+   * `tools table[name]` would return `Object.prototype` members for these
+   * names. A tool name comes from session data and is not validated, so the
+   * lookup must not treat "inherited member" as "known tool": a non-function
+   * describer throws while rendering, and `src/web` has no error boundary, so
+   * the whole ChatView would fail instead of showing a fallback row.
+   */
+  const inherited = [
+    "constructor",
+    "toString",
+    "__proto__",
+    "valueOf",
+    "hasOwnProperty",
+  ];
+
+  it("falls back for a tool named after an Object.prototype member", () => {
+    for (const toolName of inherited) {
+      const display = describeToolCall(toolName, { path: "src/a.ts" });
+      // The unknown-tool form: the tool name is its own action word.
+      expect(display.action, toolName).toBe(toolName);
+      expect(display.target, toolName).toBe("src/a.ts");
+      expect(display.fragment, toolName).toBe("steps");
+    }
+  });
+
+  it("still counts such a row as one neutral step", () => {
+    for (const toolName of inherited) {
+      expect(summarizeToolRun([call(toolName, {})]), toolName).toMatchObject({
+        bucket: "other",
+        counts: [{ fragment: "steps", count: 1 }],
+      });
+    }
+  });
+
+  it("keeps the todo action label behind an own-property lookup", () => {
+    expect(todoActionLabel("update")).toBe("更新计划");
+    expect(todoActionLabel(undefined)).toBeUndefined();
+    for (const action of inherited) {
+      expect(todoActionLabel(action), action).toBeUndefined();
+    }
   });
 });
 

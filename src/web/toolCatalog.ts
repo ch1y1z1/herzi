@@ -100,6 +100,22 @@ const BUCKET_TIE_ORDER: readonly ToolBucket[] = [
   "other",
 ];
 
+/**
+ * Own-property lookup for every catalog table.
+ *
+ * A plain `table[name]` also returns inherited members, so a tool or action
+ * literally named `constructor` / `toString` / `__proto__` / `valueOf` /
+ * `hasOwnProperty` (these names come from session data and are not validated)
+ * would bypass the unknown-tool fallback: the row renders blank, or the
+ * describer lookup returns a non-function and throws while rendering — and
+ * `src/web` has no error boundary, so the whole ChatView would fail.
+ * `Object.hasOwn` keeps the fallback for those names and changes nothing for a
+ * real one.
+ */
+function tableLookup<T>(table: Record<string, T>, key: string): T | undefined {
+  return Object.hasOwn(table, key) ? table[key] : undefined;
+}
+
 const TOOL_META: Record<
   string,
   { bucket: ToolBucket; fragment: SummaryFragment | null }
@@ -143,6 +159,16 @@ const TODO_ACTIONS: Record<string, string> = {
   clear: "清空计划",
 };
 
+/**
+ * Action word of a `todo` call, or `undefined` when the action is missing or not
+ * in the table. Exported (instead of the table itself) so callers cannot
+ * accidentally index it without the own-property guard above; an unknown
+ * `action` is meant to be shown verbatim by the caller.
+ */
+export function todoActionLabel(action: string | undefined): string | undefined {
+  return action === undefined ? undefined : tableLookup(TODO_ACTIONS, action);
+}
+
 /** Collapses whitespace, clips to `limit` characters and marks the cut. */
 export function clipText(value: string, limit: number): string {
   const line = value.replace(/\s+/g, " ").trim();
@@ -185,8 +211,8 @@ export function describeToolCall(
   toolName: string,
   args: ChatJsonObject,
 ): ToolDisplay {
-  const meta = TOOL_META[toolName];
-  const describer = TOOL_DESCRIBERS[toolName];
+  const meta = tableLookup(TOOL_META, toolName);
+  const describer = tableLookup(TOOL_DESCRIBERS, toolName);
   if (!meta || !describer) {
     return {
       action: toolName || "未知工具",
@@ -475,7 +501,11 @@ function describeWebFetch(args: ChatJsonObject): ToolDescriptor {
   return { action: "抓取网页", target: webHost(url), fullTarget: url };
 }
 
-function webHost(url: string): string {
+/**
+ * Host of a URL, used as the collapsed row's target and by the `web_fetch`
+ * detail view. Falls back to the clipped URL when it does not parse as one.
+ */
+export function webHost(url: string): string {
   try {
     const host = new URL(url).hostname;
     return host || clipText(url, TARGET_LIMIT);
@@ -515,7 +545,7 @@ function describeTodo(args: ChatJsonObject): ToolDescriptor {
   const status = stringArg(args, "status");
 
   return {
-    action: (rawAction ? TODO_ACTIONS[rawAction] : undefined) ?? "更新计划",
+    action: todoActionLabel(rawAction) ?? "更新计划",
     target: subject
       ? clipText(subject, PROMPT_TARGET_LIMIT)
       : (idLabel ?? status ?? argsTarget(args)),

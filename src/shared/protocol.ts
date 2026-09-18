@@ -59,6 +59,106 @@ export interface TerminalFrame {
   bytes: string;
 }
 
+/**
+ * One line of a structured tool diff.
+ *
+ * `kind` is the line's role only; `lineNumber` is a number inside the file the
+ * line belongs to (the new file for `add`/`context`, the old file for
+ * `remove`) and is absent on `skip`, which stands for context that Pi folded
+ * away and for which no number is reported. `text` is always the line content
+ * without the diff marker and without the line number.
+ */
+export interface ChatDiffLine {
+  kind: "add" | "remove" | "context" | "skip";
+  lineNumber?: number;
+  text: string;
+}
+
+/**
+ * One recorded answer to an `ask_user_question` question.
+ *
+ * The extension's `details.answers` entries carry these keys (see
+ * `docs/chat-compaction-todo-askuser-plan.md` §3.1). Only the verified ones are
+ * projected; `kind` stays a plain string so an unknown future kind is still
+ * rendered instead of dropping the answer.
+ */
+export interface ChatQuestionAnswer {
+  /** Index into the call's `questions` array, when the answer reported one. */
+  questionIndex?: number;
+  question?: string;
+  /** `option` / `custom` / `multi` in observed data. */
+  kind?: string;
+  /** The single chosen label or the typed custom answer; absent when null. */
+  answer?: string;
+  /** Chosen labels for a multi-select question. */
+  selected?: string[];
+  /** Free-form note the user attached, when one was reported. */
+  notes?: string;
+}
+
+/**
+ * Whitelisted, server-projected display metadata for one tool call.
+ *
+ * This is never the raw `details` object: only the fields below are copied
+ * over, each one after an explicit shape check, so an unknown or enlarged Pi
+ * `details` payload cannot reach the browser. Every field is optional and a
+ * client must render nothing for a missing field instead of guessing — the raw
+ * `result` stays available as the one source of truth for every fallback.
+ */
+export interface ChatToolDisplay {
+  /** Line-level diff, when the tool reported one (`edit`). */
+  diff?: {
+    lines: ChatDiffLine[];
+    /** First changed line in the new file, as reported by Pi. */
+    firstChangedLine?: number;
+    /** True when the server dropped lines from an over-long diff. */
+    truncated?: boolean;
+  };
+  /** Output truncation metadata, when the tool reported it (`read`/`bash`). */
+  truncation?: {
+    truncated: boolean;
+    by?: "lines" | "bytes";
+    outputLines?: number;
+    totalLines?: number;
+  };
+  /** Range parsed from the read result's trailing summary line. */
+  readRange?: {
+    from: number;
+    to: number;
+    total?: number;
+    nextOffset?: number;
+  };
+  /** Match counters reported by the search tools (`ffgrep`/`fffind`). */
+  matchCount?: { matched: number; files: number; hasMore?: boolean };
+  /**
+   * Answers of an `ask_user_question` call, from `details.answers` /
+   * `details.cancelled`. Without it the view can still show the questions and
+   * options (they are in `args`), but not what the user answered.
+   */
+  question?: {
+    answers: ChatQuestionAnswer[];
+    cancelled?: boolean;
+    globalNote?: string;
+  };
+  /**
+   * What one `todo` call changed, from `details.action` and the relevant
+   * `params` fields.
+   *
+   * Deliberately not the task list: `details.tasks` is the complete state, which
+   * the composer's status bar already shows. This card only answers "what did
+   * this call change".
+   */
+  todo?: {
+    action?: string;
+    taskId?: number;
+    subject?: string;
+    status?: string;
+    activeForm?: string;
+    description?: string;
+    blockedBy?: number[];
+  };
+}
+
 export interface ChatToolResultImage {
   image: string;
   mimeType: string;
@@ -126,6 +226,12 @@ export type ChatPart =
       args: ChatJsonObject;
       result?: unknown;
       isError?: boolean;
+      /**
+       * Server-projected display metadata. `result` keeps its meaning (the raw
+       * tool output) and stays the fallback whenever `display` is absent or the
+       * client cannot render it.
+       */
+      display?: ChatToolDisplay;
     }
   | ChatDividerPart;
 
@@ -343,6 +449,8 @@ export interface ChatRealtimeTool {
   status: "running" | "complete";
   result?: unknown;
   isError?: boolean;
+  /** Same projection as `ChatPart`'s tool-call `display` (see above). */
+  display?: ChatToolDisplay;
 }
 
 export type ChatRealtimeEvent =

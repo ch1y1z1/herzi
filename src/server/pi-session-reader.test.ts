@@ -5,7 +5,15 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { ImageUploadStore } from "./image-upload-store.js";
 import { appendManagedAttachments } from "./managed-attachments.js";
-import { PiSessionReader } from "./pi-session-reader.js";
+import {
+  PiSessionReader,
+  parsePiDisplayDiff,
+  parseReadRangeSummary,
+  projectToolDisplay,
+} from "./pi-session-reader.js";
+// The Pi extension is installed standalone and carries its own copy of the
+// projection; the parity test below is what keeps the two copies together.
+import { projectToolDisplay as projectToolDisplayBridge } from "../../integrations/pi/extensions/herzi-bridge.js";
 
 const testRoots: string[] = [];
 
@@ -730,6 +738,449 @@ describe("PiSessionReader todo snapshots", () => {
   });
 });
 
+describe("PiSessionReader tool display projection", () => {
+  it("projects an edit diff and keeps the raw result", async () => {
+    const sessionPath = await writeSession([
+      ...toolPair(
+        "e1",
+        null,
+        "2026-09-15T00:00:00.000Z",
+        "edit",
+        { path: "src/a.ts" },
+        {
+          diff: [
+            "+ 92 const added = true;",
+            "- 88 const added = false;",
+            "  91 context line",
+            "     ...",
+          ].join("\n"),
+          firstChangedLine: 92,
+          // Not whitelisted: must never reach the client.
+          patch: "@@ -88,2 +92,2 @@",
+          fullOutputPath: "/private/tmp/secret-output.txt",
+          unknownField: { huge: "payload" },
+        },
+        "… replaced 1 block(s) in src/a.ts",
+      ),
+    ]);
+
+    const snapshot = await new PiSessionReader().read("pane-1", sessionPath, false);
+    const part = snapshot.messages[0]?.content[0];
+    expect(part).toMatchObject({
+      type: "tool-call",
+      toolName: "edit",
+      result: "… replaced 1 block(s) in src/a.ts",
+      display: {
+        diff: {
+          firstChangedLine: 92,
+          lines: [
+            { kind: "add", lineNumber: 92, text: "const added = true;" },
+            { kind: "remove", lineNumber: 88, text: "const added = false;" },
+            { kind: "context", lineNumber: 91, text: "context line" },
+            { kind: "skip", text: "..." },
+          ],
+        },
+      },
+    });
+    const display = (part as { display?: unknown }).display as
+      | { diff?: Record<string, unknown> }
+      | undefined;
+    expect(Object.keys(display ?? {})).toEqual(["diff"]);
+    expect(Object.keys(display?.diff ?? {}).sort()).toEqual([
+      "firstChangedLine",
+      "lines",
+    ]);
+  });
+
+  it("projects the read range and truncation metadata", async () => {
+    const sessionPath = await writeSession([
+      ...toolPair(
+        "r1",
+        null,
+        "2026-09-15T00:00:00.000Z",
+        "read",
+        { path: "src/a.ts", offset: 100 },
+        {
+          truncation: {
+            truncated: true,
+            truncatedBy: "lines",
+            outputLines: 100,
+            totalLines: 512,
+            maxLines: 2000,
+            content: "must not be projected",
+          },
+        },
+        "file body\n\n[Showing lines 100-199 of 512. Use offset=200 to continue.]",
+      ),
+    ]);
+
+    const snapshot = await new PiSessionReader().read("pane-1", sessionPath, false);
+    const display = (
+      snapshot.messages[0]?.content[0] as { display?: Record<string, unknown> }
+    )?.display;
+    expect(display).toEqual({
+      truncation: {
+        truncated: true,
+        by: "lines",
+        outputLines: 100,
+        totalLines: 512,
+      },
+      readRange: { from: 100, to: 199, total: 512, nextOffset: 200 },
+    });
+  });
+
+  it("projects the search counters and drops everything else", async () => {
+    const sessionPath = await writeSession([
+      ...toolPair(
+        "g1",
+        null,
+        "2026-09-15T00:00:00.000Z",
+        "ffgrep",
+        { pattern: "needle" },
+        { totalMatched: 12, totalFiles: 4, hasMore: true, pageIndex: 0 },
+        "src/a.ts\n3: needle",
+      ),
+    ]);
+
+    const snapshot = await new PiSessionReader().read("pane-1", sessionPath, false);
+    const display = (
+      snapshot.messages[0]?.content[0] as { display?: Record<string, unknown> }
+    )?.display;
+    expect(display).toEqual({
+      matchCount: { matched: 12, files: 4, hasMore: true },
+    });
+  });
+
+  it("omits the display when nothing was reported", async () => {
+    const sessionPath = await writeSession([
+      ...toolPair(
+        "b1",
+        null,
+        "2026-09-15T00:00:00.000Z",
+        "bash",
+        { command: "echo hi" },
+        undefined,
+        "hi",
+      ),
+    ]);
+
+    const snapshot = await new PiSessionReader().read("pane-1", sessionPath, false);
+    expect(snapshot.messages[0]?.content[0]).not.toHaveProperty("display");
+  });
+
+  it("projects the answers of an ask_user_question result", async () => {
+    const sessionPath = await writeSession([
+      ...toolPair(
+        "q1",
+        null,
+        "2026-09-15T00:00:00.000Z",
+        "ask_user_question",
+        { questions: [{ question: "Which one?", header: "Pick" }] },
+        {
+          answers: [
+            {
+              questionIndex: 0,
+              question: "Which one?",
+              kind: "option",
+              answer: "First",
+              selected: ["First", "Second"],
+              notes: "a note",
+              preview: { huge: "payload" },
+            },
+          ],
+          cancelled: false,
+          globalNote: "global",
+          error: "not whitelisted",
+        },
+        "answered",
+      ),
+    ]);
+
+    const snapshot = await new PiSessionReader().read("pane-1", sessionPath, false);
+    const display = (
+      snapshot.messages[0]?.content[0] as { display?: Record<string, unknown> }
+    )?.display;
+    expect(display).toEqual({
+      question: {
+        answers: [
+          {
+            questionIndex: 0,
+            question: "Which one?",
+            kind: "option",
+            answer: "First",
+            selected: ["First", "Second"],
+            notes: "a note",
+          },
+        ],
+        cancelled: false,
+        globalNote: "global",
+      },
+    });
+  });
+
+  it("keeps only the cancelled flag when the answers are unrecognised", async () => {
+    const sessionPath = await writeSession([
+      ...toolPair(
+        "q1",
+        null,
+        "2026-09-15T00:00:00.000Z",
+        "ask_user_question",
+        { questions: [] },
+        { answers: [{ unknown: true }], cancelled: true },
+        "",
+      ),
+      ...toolPair(
+        "q2",
+        "q1-result",
+        "2026-09-15T00:00:10.000Z",
+        "ask_user_question",
+        { questions: [] },
+        { answers: "nope" },
+        "",
+      ),
+    ]);
+
+    const snapshot = await new PiSessionReader().read("pane-1", sessionPath, false);
+    expect((snapshot.messages[0]?.content[0] as { display?: unknown }).display).toEqual({
+      question: { answers: [], cancelled: true },
+    });
+    // An answers payload that is not an array is not a projection at all.
+    expect(snapshot.messages[1]?.content[0]).not.toHaveProperty("display");
+  });
+
+  it("projects what a todo call changed, not the task list", async () => {
+    const sessionPath = await writeSession([
+      ...toolPair(
+        "t1",
+        null,
+        "2026-09-15T00:00:00.000Z",
+        "todo",
+        { action: "update", id: 3, status: "completed" },
+        {
+          action: "update",
+          nextId: 9,
+          params: { id: 3, subject: "第三个任务", status: "completed" },
+          tasks: [
+            { id: 3, subject: "第三个任务", status: "completed" },
+            { id: 4, subject: "第四个任务", status: "pending" },
+          ],
+        },
+        "ok",
+      ),
+    ]);
+
+    const snapshot = await new PiSessionReader().read("pane-1", sessionPath, false);
+    const display = (
+      snapshot.messages[0]?.content[0] as { display?: Record<string, unknown> }
+    )?.display;
+    expect(display).toEqual({
+      todo: {
+        action: "update",
+        taskId: 3,
+        subject: "第三个任务",
+        status: "completed",
+      },
+    });
+    // The full task list stays out: the composer's status bar owns it.
+    expect(JSON.stringify(display)).not.toContain("第四个任务");
+  });
+});
+
+/**
+ * The Pi extension cannot import the reader, so its projection is a by-hand copy.
+ * This is the check that the copy still agrees with the canonical one.
+ */
+describe("bridge projection parity", () => {
+  const cases: Array<{ toolName: string; details: unknown; text: string }> = [
+    {
+      toolName: "edit",
+      details: {
+        diff: "+12 added\n- 9 removed\n  10 context\n      ...",
+        firstChangedLine: 12,
+        patch: "@@ -9,1 +12,1 @@",
+      },
+      text: "replaced",
+    },
+    {
+      toolName: "edit",
+      details: { diff: "@@ not a display diff" },
+      text: "replaced",
+    },
+    {
+      toolName: "read",
+      details: { truncation: { truncated: true, truncatedBy: "lines", outputLines: 3, totalLines: 20 } },
+      text: "body\n\n[Showing lines 1-3 of 20. Use offset=4 to continue.]",
+    },
+    {
+      toolName: "bash",
+      details: { truncation: { truncated: false }, fullOutputPath: "/tmp/x" },
+      text: "output",
+    },
+    { toolName: "ffgrep", details: { totalMatched: 4, totalFiles: 2, hasMore: true }, text: "src/a.ts\n1: x" },
+    { toolName: "ffgrep", details: { totalMatched: "4" }, text: "src/a.ts\n1: x" },
+    {
+      toolName: "ask_user_question",
+      details: { answers: [{ questionIndex: 0, kind: "custom", answer: "typed" }], cancelled: true },
+      text: "answered",
+    },
+    { toolName: "ask_user_question", details: { answers: [{ other: 1 }] }, text: "answered" },
+    {
+      toolName: "todo",
+      details: { action: "delete", params: { id: 7, blockedBy: [1, 2] } },
+      text: "ok",
+    },
+    { toolName: "todo", details: {}, text: "ok" },
+    {
+      toolName: "edit",
+      details: {
+        diff: Array.from({ length: 20 }, (_value, index) => `+${index} ${"z".repeat(50_000)}`).join("\n"),
+      },
+      text: "replaced",
+    },
+    {
+      toolName: "ask_user_question",
+      details: { answers: [{ kind: "multi", selected: ["w".repeat(50_000)] }] },
+      text: "answered",
+    },
+    { toolName: "web_search", details: { anything: true }, text: "results" },
+  ];
+
+  it("matches the reader projection for every shape", () => {
+    for (const testCase of cases) {
+      const fromReader = projectToolDisplay(
+        testCase.toolName,
+        testCase.details,
+        testCase.text,
+      );
+      const fromBridge = projectToolDisplayBridge(testCase.toolName, {
+        content: [{ type: "text", text: testCase.text }],
+        details: testCase.details,
+      });
+      expect(fromBridge, `${testCase.toolName}: ${JSON.stringify(testCase.details)}`)
+        .toEqual(fromReader);
+    }
+  });
+});
+
+describe("parsePiDisplayDiff", () => {
+  it("parses added, removed, context and skipped lines", () => {
+    expect(
+      parsePiDisplayDiff(
+        ["+92 const a = 1;", "- 8 const b = 2;", " 91 const c = 3;", "   ..."].join(
+          "\n",
+        ),
+      ),
+    ).toEqual({
+      truncated: false,
+      lines: [
+        { kind: "add", lineNumber: 92, text: "const a = 1;" },
+        { kind: "remove", lineNumber: 8, text: "const b = 2;" },
+        { kind: "context", lineNumber: 91, text: "const c = 3;" },
+        { kind: "skip", text: "..." },
+      ],
+    });
+  });
+
+  it("keeps empty content lines and tolerates a trailing newline", () => {
+    expect(parsePiDisplayDiff(" 7 \n")).toEqual({
+      truncated: false,
+      lines: [{ kind: "context", lineNumber: 7, text: "" }],
+    });
+  });
+
+  it("refuses unknown, partial and empty shapes", () => {
+    expect(parsePiDisplayDiff("@@ -1,2 +1,2 @@\n+x")).toBeUndefined();
+    expect(parsePiDisplayDiff("+92 has a number\n+no number here")).toBeUndefined();
+    expect(parsePiDisplayDiff("")).toBeUndefined();
+    expect(parsePiDisplayDiff("   ")).toBeUndefined();
+    expect(parsePiDisplayDiff(42)).toBeUndefined();
+  });
+
+  it("bounds the payload by lines, by line length and by total characters", () => {
+    // The line cap alone bounds nothing: a few lines of 200k characters would
+    // still be megabytes on the wire, and `display` is an extra downlink.
+    const longLine = "x".repeat(50_000);
+    const clipped = parsePiDisplayDiff(
+      Array.from({ length: 20 }, (_value, index) => `+${index} ${longLine}`).join("\n"),
+    );
+    expect(clipped?.truncated).toBe(true);
+    expect(clipped?.lines[0]?.text.endsWith("…")).toBe(true);
+    expect(clipped?.lines[0]?.text.length).toBeLessThan(2_100);
+
+    const manyLongLines = parsePiDisplayDiff(
+      Array.from({ length: 500 }, (_value, index) => `+${index} ${"y".repeat(2_000)}`).join("\n"),
+    );
+    const bytes = JSON.stringify(manyLongLines).length;
+    expect(bytes).toBeLessThan(250_000);
+    expect(manyLongLines?.truncated).toBe(true);
+
+    const manyLines = parsePiDisplayDiff(
+      Array.from({ length: 3_000 }, (_value, index) => `+${index} line`).join("\n"),
+    );
+    expect(manyLines?.lines).toHaveLength(2_000);
+    expect(manyLines?.truncated).toBe(true);
+
+    // A normal diff is not marked truncated.
+    expect(parsePiDisplayDiff("+1 a\n-2 b")?.truncated).toBe(false);
+  });
+});
+
+describe("parseReadRangeSummary", () => {
+  it("parses both range shapes Pi writes", () => {
+    expect(
+      parseReadRangeSummary("body\n\n[Showing lines 100-199 of 512. Use offset=200 to continue.]"),
+    ).toEqual({ from: 100, to: 199, total: 512, nextOffset: 200 });
+    expect(
+      parseReadRangeSummary(
+        "body\n\n[Showing lines 1-2000 of 9000 (50KB limit). Use offset=2001 to continue.]\n",
+      ),
+    ).toEqual({ from: 1, to: 2000, total: 9000, nextOffset: 2001 });
+  });
+
+  it("returns no range for other trailing text", () => {
+    expect(parseReadRangeSummary("body")).toBeUndefined();
+    expect(parseReadRangeSummary("body\n\n[4 more lines in file. Use offset=9 to continue.]")).toBeUndefined();
+    expect(parseReadRangeSummary("[Showing lines 1-2 of 3.]")).toBeUndefined();
+    expect(parseReadRangeSummary("")).toBeUndefined();
+  });
+});
+
+describe("projectToolDisplay", () => {
+  it("returns undefined for tools without a projection", () => {
+    expect(projectToolDisplay("web_search", { anything: 1 }, "text")).toBeUndefined();
+    expect(projectToolDisplay(undefined, undefined, "text")).toBeUndefined();
+    expect(projectToolDisplay("bash", "not-an-object", "text")).toBeUndefined();
+  });
+
+  it("refuses a partially reported diff instead of guessing", () => {
+    expect(projectToolDisplay("edit", { diff: "@@ nope" }, "")).toBeUndefined();
+    expect(projectToolDisplay("edit", { firstChangedLine: 3 }, "")).toBeUndefined();
+  });
+
+  it("bounds every string inside a projected array", () => {
+    const long = "y".repeat(50_000);
+    const display = projectToolDisplay(
+      "ask_user_question",
+      { answers: [{ kind: "multi", selected: Array.from({ length: 64 }, () => long) }] },
+      "answered",
+    );
+    const selected = display?.question?.answers[0]?.selected ?? [];
+    expect(selected).toHaveLength(64);
+    expect(selected.every((entry) => entry.length <= 1_001)).toBe(true);
+    expect(JSON.stringify(display).length).toBeLessThan(100_000);
+  });
+
+  it("still reads the range when the tool reported no details", () => {
+    expect(
+      projectToolDisplay(
+        "read",
+        undefined,
+        "body\n\n[Showing lines 2-3 of 9. Use offset=4 to continue.]",
+      ),
+    ).toEqual({ readRange: { from: 2, to: 3, total: 9, nextOffset: 4 } });
+  });
+});
+
 async function writeSession(entries: unknown[]): Promise<string> {
   const root = await mkdtemp(path.join(process.cwd(), ".tmp-herzi-session-test-"));
   testRoots.push(root);
@@ -811,6 +1262,8 @@ function toolResultEntry(
   timestamp: string,
   toolName: string,
   details: unknown,
+  content: unknown = "ok",
+  callId = `call-${id}`,
 ) {
   return {
     type: "message",
@@ -819,13 +1272,60 @@ function toolResultEntry(
     timestamp,
     message: {
       role: "toolResult",
-      toolCallId: `call-${id}`,
+      toolCallId: callId,
       toolName,
       isError: false,
-      content: "ok",
+      content,
       ...(details === undefined ? {} : { details }),
     },
   };
+}
+
+/** Assistant entry carrying one tool call, so a result can be attached to it. */
+function toolCallEntry(
+  id: string,
+  parentId: string | null,
+  timestamp: string,
+  toolName: string,
+  args: Record<string, unknown>,
+  callId = `call-${id}`,
+) {
+  return {
+    type: "message",
+    id,
+    parentId,
+    timestamp,
+    message: {
+      role: "assistant",
+      timestamp: Date.parse(timestamp),
+      stopReason: "stop",
+      content: [{ type: "toolCall", id: callId, name: toolName, arguments: args }],
+    },
+  };
+}
+
+/** Assistant entry + matching result entry, written as one pair. */
+function toolPair(
+  id: string,
+  parentId: string | null,
+  timestamp: string,
+  toolName: string,
+  args: Record<string, unknown>,
+  details: unknown,
+  content: unknown = "ok",
+) {
+  return [
+    toolCallEntry(id, parentId, timestamp, toolName, args),
+    toolResultEntry(
+      `${id}-result`,
+      id,
+      timestamp,
+      toolName,
+      details,
+      content,
+      `call-${id}`,
+    ),
+  ];
 }
 
 function todoEntry(

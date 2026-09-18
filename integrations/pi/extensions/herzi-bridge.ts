@@ -12,7 +12,64 @@ type ChatPart =
       args: JsonObject;
       result?: unknown;
       isError?: boolean;
+      display?: ChatToolDisplay;
     };
+
+/**
+ * Mirrors `ChatToolDisplay` in `src/shared/protocol.ts`.
+ *
+ * The bridge is installed as a standalone Pi package (`pi install
+ * ./integrations/pi`), so it cannot import from the Herzi sources; the types
+ * and the projection below are therefore kept in sync by hand. The canonical
+ * implementation — with the format notes and the tests — lives in
+ * `src/server/pi-session-reader.ts` (`projectToolDisplay`); change both.
+ * The bridge export is not part of the Pi extension API: it exists so
+ * `src/server/pi-session-reader.test.ts` can assert that both copies agree.
+ */
+type ChatDiffLine = {
+  kind: "add" | "remove" | "context" | "skip";
+  lineNumber?: number;
+  text: string;
+};
+
+type ChatQuestionAnswer = {
+  questionIndex?: number;
+  question?: string;
+  kind?: string;
+  answer?: string;
+  selected?: string[];
+  notes?: string;
+};
+
+type ChatToolDisplay = {
+  diff?: {
+    lines: ChatDiffLine[];
+    firstChangedLine?: number;
+    truncated?: boolean;
+  };
+  truncation?: {
+    truncated: boolean;
+    by?: "lines" | "bytes";
+    outputLines?: number;
+    totalLines?: number;
+  };
+  readRange?: { from: number; to: number; total?: number; nextOffset?: number };
+  matchCount?: { matched: number; files: number; hasMore?: boolean };
+  question?: {
+    answers: ChatQuestionAnswer[];
+    cancelled?: boolean;
+    globalNote?: string;
+  };
+  todo?: {
+    action?: string;
+    taskId?: number;
+    subject?: string;
+    status?: string;
+    activeForm?: string;
+    description?: string;
+    blockedBy?: number[];
+  };
+};
 
 interface ChatMessage {
   id: string;
@@ -50,6 +107,7 @@ type BridgeEvent =
         status: "running" | "complete";
         result?: unknown;
         isError?: boolean;
+        display?: ChatToolDisplay;
       };
     }
   | {
@@ -410,17 +468,20 @@ export default function herziBridge(pi: PiApiLike): void {
 
   pi.on("tool_execution_end", (event, ctx) => {
     if (!rootSession || typeof event.toolCallId !== "string") return;
+    const toolName = typeof event.toolName === "string" ? event.toolName : "tool";
+    const display = projectToolDisplay(toolName, event.result);
     queue(
       `tool:${event.toolCallId}`,
       {
         type: "tool",
         tool: {
           toolCallId: event.toolCallId,
-          toolName: typeof event.toolName === "string" ? event.toolName : "tool",
+          toolName,
           args: {},
           status: "complete",
           result: toolResultValue(event.result),
           isError: event.isError === true,
+          ...(display ? { display } : {}),
         },
       },
       ctx,
@@ -540,6 +601,273 @@ function statusFromStopReason(value: unknown): ChatMessage["status"] {
     default:
       return { type: "complete", reason: "unknown" };
   }
+}
+
+/**
+ * Live-path counterpart of `projectToolDisplay` in
+ * `src/server/pi-session-reader.ts`. It must produce the same structure, or a
+ * running card and the same card after the JSONL entry lands would render
+ * differently.
+ */
+export function projectToolDisplay(
+  toolName: string,
+  result: unknown,
+): ChatToolDisplay | undefined {
+  const details =
+    isRecord(result) && isRecord(result.details) ? result.details : undefined;
+  const display: ChatToolDisplay = {};
+
+  if (toolName === "edit" && details) {
+    const diff = parsePiDisplayDiff(details.diff);
+    if (diff) {
+      const firstChangedLine = nonNegativeInteger(details.firstChangedLine);
+      display.diff = {
+        lines: diff.lines,
+        ...(firstChangedLine !== undefined ? { firstChangedLine } : {}),
+        ...(diff.truncated ? { truncated: true } : {}),
+      };
+    }
+  }
+
+  if ((toolName === "read" || toolName === "bash") && details) {
+    const truncation = projectTruncation(details.truncation);
+    if (truncation) display.truncation = truncation;
+  }
+
+  if (toolName === "read") {
+    const readRange = parseReadRangeSummary(toolResultText(result));
+    if (readRange) display.readRange = readRange;
+  }
+
+  if ((toolName === "ffgrep" || toolName === "fffind") && details) {
+    const matched = nonNegativeInteger(details.totalMatched);
+    const files = nonNegativeInteger(details.totalFiles);
+    if (matched !== undefined && files !== undefined) {
+      display.matchCount = {
+        matched,
+        files,
+        ...(typeof details.hasMore === "boolean" ? { hasMore: details.hasMore } : {}),
+      };
+    }
+  }
+
+  if (toolName === "ask_user_question" && details) {
+    const question = projectQuestion(details);
+    if (question) display.question = question;
+  }
+
+  if (toolName === "todo" && details) {
+    const todo = projectTodoChange(details);
+    if (todo) display.todo = todo;
+  }
+
+  return Object.keys(display).length > 0 ? display : undefined;
+}
+
+const DIFF_MAX_LINES = 2_000;
+/** Character budget for one projected diff (the line cap alone bounds nothing). */
+const DIFF_MAX_CHARS = 200_000;
+/** Longest single diff line; a longer line is clipped and marks the diff truncated. */
+const DIFF_MAX_LINE_CHARS = 2_000;
+
+function parsePiDisplayDiff(
+  value: unknown,
+): { lines: ChatDiffLine[]; truncated: boolean } | undefined {
+  if (typeof value !== "string" || !value.trim()) return undefined;
+  const raw = value.split("\n");
+  if (raw.at(-1) === "") raw.pop();
+
+  const parsed: ChatDiffLine[] = [];
+  for (const line of raw) {
+    const marker = line[0];
+    if (marker !== "+" && marker !== "-" && marker !== " ") return undefined;
+    const rest = line.slice(1);
+    if (rest.trim() === "...") {
+      parsed.push({ kind: "skip", text: "..." });
+      continue;
+    }
+    const match = /^ *(\d+)(?: (.*))?$/u.exec(rest);
+    if (!match) return undefined;
+    parsed.push({
+      kind: marker === "+" ? "add" : marker === "-" ? "remove" : "context",
+      lineNumber: Number(match[1]),
+      text: match[2] ?? "",
+    });
+  }
+  if (!parsed.length) return undefined;
+
+  // Payload shaping only: the whole diff had to match the format first.
+  const lines: ChatDiffLine[] = [];
+  let budget = DIFF_MAX_CHARS;
+  let truncated = parsed.length > DIFF_MAX_LINES;
+  for (const line of parsed) {
+    if (lines.length >= DIFF_MAX_LINES) break;
+    const clipped = clipDisplayText(line.text, DIFF_MAX_LINE_CHARS);
+    if (clipped.length > budget) {
+      truncated = true;
+      break;
+    }
+    budget -= clipped.length;
+    if (clipped !== line.text) truncated = true;
+    lines.push(clipped === line.text ? line : { ...line, text: clipped });
+  }
+  return { lines, truncated };
+}
+
+function clipDisplayText(value: string, max: number): string {
+  return value.length > max ? `${value.slice(0, max)}…` : value;
+}
+
+const READ_SHOWING_LINES =
+  /^\[Showing lines (\d+)-(\d+) of (\d+)(?: \([^)]*\))?\. Use offset=(\d+) to continue\.\]$/u;
+
+function parseReadRangeSummary(
+  text: string,
+): ChatToolDisplay["readRange"] | undefined {
+  if (!text) return undefined;
+  const lines = text.split("\n");
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const line = lines[index]?.trim() ?? "";
+    if (!line) continue;
+    const match = READ_SHOWING_LINES.exec(line);
+    if (!match) return undefined;
+    return {
+      from: Number(match[1]),
+      to: Number(match[2]),
+      total: Number(match[3]),
+      nextOffset: Number(match[4]),
+    };
+  }
+  return undefined;
+}
+
+function projectTruncation(
+  value: unknown,
+): ChatToolDisplay["truncation"] | undefined {
+  if (!isRecord(value) || typeof value.truncated !== "boolean") return undefined;
+  const by =
+    value.truncatedBy === "lines" || value.truncatedBy === "bytes"
+      ? value.truncatedBy
+      : undefined;
+  const outputLines = nonNegativeInteger(value.outputLines);
+  const totalLines = nonNegativeInteger(value.totalLines);
+  return {
+    truncated: value.truncated,
+    ...(by ? { by } : {}),
+    ...(outputLines !== undefined ? { outputLines } : {}),
+    ...(totalLines !== undefined ? { totalLines } : {}),
+  };
+}
+
+function projectQuestion(record: JsonObject): ChatToolDisplay["question"] | undefined {
+  const answers =
+    Array.isArray(record.answers) && record.answers.length <= DISPLAY_ARRAY_MAX
+      ? projectQuestionAnswers(record.answers)
+      : undefined;
+  const cancelled =
+    typeof record.cancelled === "boolean" ? record.cancelled : undefined;
+  const globalNote = boundedString(record.globalNote);
+  if (!answers && cancelled === undefined && globalNote === undefined) {
+    return undefined;
+  }
+  return {
+    answers: answers ?? [],
+    ...(cancelled === undefined ? {} : { cancelled }),
+    ...(globalNote === undefined ? {} : { globalNote }),
+  };
+}
+
+function projectQuestionAnswers(value: unknown[]): ChatQuestionAnswer[] | undefined {
+  const answers: ChatQuestionAnswer[] = [];
+  for (const entry of value) {
+    if (!isRecord(entry)) return undefined;
+    const questionIndex = nonNegativeInteger(entry.questionIndex);
+    const question = boundedString(entry.question);
+    const kind = boundedString(entry.kind);
+    const answer = boundedString(entry.answer);
+    const selected = boundedStringArray(entry.selected);
+    const notes = boundedString(entry.notes);
+    const projected: ChatQuestionAnswer = {
+      ...(questionIndex === undefined ? {} : { questionIndex }),
+      ...(question === undefined ? {} : { question }),
+      ...(kind === undefined ? {} : { kind }),
+      ...(answer === undefined ? {} : { answer }),
+      ...(selected === undefined ? {} : { selected }),
+      ...(notes === undefined ? {} : { notes }),
+    };
+    if (Object.keys(projected).length === 0) continue;
+    answers.push(projected);
+  }
+  // Nothing recognised means no answers were projected at all; an empty list
+  // would read as "the user answered nothing".
+  return answers.length ? answers : undefined;
+}
+
+function projectTodoChange(record: JsonObject): ChatToolDisplay["todo"] | undefined {
+  const params = isRecord(record.params) ? record.params : undefined;
+  const action = boundedString(record.action);
+  const taskId = nonNegativeInteger(params?.id);
+  const subject = boundedString(params?.subject);
+  const status = boundedString(params?.status);
+  const activeForm = boundedString(params?.activeForm);
+  const description = boundedString(params?.description);
+  const blockedBy = boundedNumberArray(params?.blockedBy);
+  const todo: ChatToolDisplay["todo"] = {
+    ...(action === undefined ? {} : { action }),
+    ...(taskId === undefined ? {} : { taskId }),
+    ...(subject === undefined ? {} : { subject }),
+    ...(status === undefined ? {} : { status }),
+    ...(activeForm === undefined ? {} : { activeForm }),
+    ...(description === undefined ? {} : { description }),
+    ...(blockedBy === undefined ? {} : { blockedBy }),
+  };
+  return Object.keys(todo).length > 0 ? todo : undefined;
+}
+
+const DISPLAY_STRING_MAX = 1_000;
+const DISPLAY_ARRAY_MAX = 64;
+
+function boundedString(value: unknown): string | undefined {
+  if (typeof value !== "string" || !value.trim()) return undefined;
+  return value.length > DISPLAY_STRING_MAX
+    ? `${value.slice(0, DISPLAY_STRING_MAX)}…`
+    : value;
+}
+
+function boundedStringArray(value: unknown): string[] | undefined {
+  if (!Array.isArray(value) || value.length > DISPLAY_ARRAY_MAX) return undefined;
+  const strings = value
+    .map((entry) => boundedString(entry))
+    .filter((entry): entry is string => entry !== undefined);
+  return strings.length ? strings : undefined;
+}
+
+function boundedNumberArray(value: unknown): number[] | undefined {
+  if (!Array.isArray(value) || value.length > DISPLAY_ARRAY_MAX) return undefined;
+  const numbers = value.filter(
+    (entry): entry is number => typeof entry === "number" && Number.isSafeInteger(entry),
+  );
+  return numbers.length ? numbers : undefined;
+}
+
+function nonNegativeInteger(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0
+    ? value
+    : undefined;
+}
+
+function toolResultText(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (isRecord(value) && Array.isArray(value.content)) {
+    return value.content
+      .flatMap((part) =>
+        isRecord(part) && part.type === "text" && typeof part.text === "string"
+          ? [part.text]
+          : [],
+      )
+      .join("\n");
+  }
+  return "";
 }
 
 function toolResultValue(value: unknown): unknown {

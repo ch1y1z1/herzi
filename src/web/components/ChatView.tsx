@@ -59,6 +59,7 @@ import {
   toolRunVerb,
   type ToolDiff,
 } from "../toolCatalog";
+import { toolViewFor, type ToolDetailItem } from "../toolViews";
 import { latestAssistantTurn, useLatestTurnActivity } from "../turnActivity";
 import {
   ChatImagePart,
@@ -75,6 +76,7 @@ import type {
   ChatPart,
   ChatRealtimeState,
   ChatSnapshot,
+  ChatToolDisplay,
   PaneSummary,
   PromptDeliveryEvent,
   PromptDeliveryStatus,
@@ -101,6 +103,8 @@ type ActivityItem =
       args: ChatJsonObject;
       result?: unknown;
       isError?: boolean;
+      /** Server-projected tool display metadata; absent without one. */
+      display?: ChatToolDisplay;
     };
 
 type ToolActivityItem = Extract<ActivityItem, { type: "tool" }>;
@@ -1212,9 +1216,22 @@ function ToolFallback({
   args,
   result,
   isError,
+  ...rest
 }: ToolCallMessagePartProps) {
   const complete = result !== undefined;
   const [open, setOpen] = usePanelOpenState(toolPanelKey(toolCallId));
+  // `display` is part of the raw tool-call part; assistant-ui spreads the part
+  // into this component unchanged, so the optional field is read defensively
+  // exactly like the reasoning part's `durationMs`.
+  const display = partToolDisplay(rest);
+  const item: ToolDetailItem = {
+    toolCallId,
+    toolName,
+    args,
+    ...(complete ? { result } : {}),
+    ...(isError === undefined ? {} : { isError }),
+    ...(display === undefined ? {} : { display }),
+  };
   return (
     <details
       className={`tool-card ${isError ? "tool-error" : ""}`}
@@ -1230,14 +1247,7 @@ function ToolFallback({
         />
       </summary>
       <div className="tool-detail">
-        <ToolData label="Arguments" value={args} />
-        {complete && (
-          <ToolResultData
-            toolName={toolName}
-            label={isError ? "Error" : "Result"}
-            value={result}
-          />
-        )}
+        <ToolDetail item={item} />
       </div>
     </details>
   );
@@ -1417,16 +1427,42 @@ function ToolItemRow({ item }: { item: ToolActivityItem }) {
         />
       </summary>
       <div className="tool-detail">
-        <ToolData label="Arguments" value={item.args} />
-        {complete && (
-          <ToolResultData
-            toolName={item.toolName}
-            label={item.isError ? "Error" : "Result"}
-            value={item.result}
-          />
-        )}
+        <ToolDetail item={item} />
       </div>
     </details>
+  );
+}
+
+/**
+ * Expansion content of one tool row: the registered view for the tool, or the
+ * generic Arguments/Result detail. Every view receives the generic detail as
+ * `fallback`, so a tool whose data does not parse still shows its raw result
+ * instead of an empty panel.
+ */
+function ToolDetail({ item }: { item: ToolDetailItem }) {
+  const View = toolViewFor(item.toolName);
+  const fallback = <GenericToolDetail item={item} />;
+  // A failed call is not the thing a view describes: its result is an error
+  // message, not a diff, file content or a page. Rendering that text through a
+  // structured view would mislabel it (and for `write`/`todo` it would hide the
+  // reason entirely), so errors always take the generic Arguments/Error detail.
+  // Failing calls are not rare: `bash` failed 217/5192 times in real sessions.
+  if (item.isError || !View) return fallback;
+  return <View item={item} fallback={fallback} />;
+}
+
+function GenericToolDetail({ item }: { item: ToolDetailItem }) {
+  return (
+    <>
+      <ToolData label="Arguments" value={item.args} />
+      {item.result !== undefined && (
+        <ToolResultData
+          toolName={item.toolName}
+          label={item.isError ? "Error" : "Result"}
+          value={item.result}
+        />
+      )}
+    </>
   );
 }
 
@@ -2084,7 +2120,20 @@ function toActivityItem(part: DisplayPart): ActivityItem | null {
     args: part.args,
     ...(part.result !== undefined ? { result: part.result } : {}),
     ...(part.isError !== undefined ? { isError: part.isError } : {}),
+    ...(part.display !== undefined ? { display: part.display } : {}),
   };
+}
+
+/**
+ * `display` off a raw tool-call part. It is not part of assistant-ui's declared
+ * props but the part object is passed through unchanged, so it is read like the
+ * reasoning part's `durationMs`: defensively, and only when it is an object.
+ */
+function partToolDisplay(part: object): ChatToolDisplay | undefined {
+  const value = (part as { display?: unknown }).display;
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as ChatToolDisplay)
+    : undefined;
 }
 
 /**
@@ -2199,14 +2248,20 @@ function mergeRealtime(
         if (!liveTool) return part;
 
         const args = Object.keys(liveTool.args).length ? liveTool.args : part.args;
+        // The live projection is the only one available while the call runs;
+        // once the JSONL entry lands, its projection (or the live one, when the
+        // entry has none) is used.
+        const display = part.display ?? liveTool.display;
+        const withDisplay = display === undefined ? {} : { display };
         if (liveTool.status !== "complete" || part.result !== undefined) {
-          return { ...part, args };
+          return { ...part, args, ...withDisplay };
         }
         return {
           ...part,
           args,
           result: liveTool.result,
           isError: liveTool.isError,
+          ...withDisplay,
         };
       }),
     }));
