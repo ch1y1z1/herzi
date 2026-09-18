@@ -411,3 +411,50 @@ edit file.ts  +42 −7                      read file.ts · 第 100–199 行
 - 折叠行、分组规则、`Worked for` 结构**完全不变**；
 - 自动测试覆盖解析器与降级路径，且不依赖真实 Pane；
 - 不在文档、日志中记录真实文件内容。
+
+## 11. 修订 Rev.2（2026-09-18）：固定高度滚动 + shiki 高亮
+
+### 动因
+
+开发者反馈：现设计「非常不好，而且不美观」—— 默认折叠 200 行、点「展开全部」后一次性渲染几千行，两个极端都不好；而且代码没有语法高亮。
+
+### 对 Memoh 的一手核对（commit `1aaef83`，追加核对）
+
+| 方面 | Memoh 实际做法 |
+| --- | --- |
+| 长内容 | **不做虚拟滚动**：`max-h-72`(288px) / `max-h-96`(384px) / `max-h-48`(192px) + `overflow-y-auto`，DOM 里仍是全部行 |
+| 高亮 | `shiki` 3.23（`apps/web/package.json`），统一 `CodeBlock` 内核；高亮未就绪时先渲染纯文本而非 spinner |
+| diff | `useShikiHighlighter` 输出**按行**的 `{kind, lineNumber, html}`；行号 gutter + `−/+` 标记 + 整行红/绿背景带 + 左边缘实心指示条（新文件不加指示条） |
+| 统一形态 | `PreviewBox`（`max-h-48 bg-muted/30 rounded-sm px-2 py-1 text-xs whitespace-pre-wrap break-all`），把 5 处漂移的 `max-h` 收敛为一处 |
+| 文案与颜色 | 命令前缀 `$`；stderr 用 destructive 红；`text-xs`(12px) + `leading-relaxed` |
+
+依赖体积（unpacked，含全部语言）：shiki 602KB、`@shikijs/core` 64KB、highlight.js 5.5MB、prismjs 2MB、refractor 1MB。Herzi 为 localhost 本地服务，首屏体积不敏感。
+
+### 已确认决策（2026-09-18）
+
+| 编号 | 决策 | 结果 |
+| --- | --- | --- |
+| R1 | 内容区高度 | **16 行**可视，超出靠滚动 |
+| R2 | 虚拟滚动 | **不做**（学 Memoh：仅限高 + 原生滚动） |
+| R3 | 「展开全部 / 收起」 | **全部去掉**（含 Markdown 类） |
+| R4 | 代码高亮 | **shiki 按需加载**（新增 production dependency，开发者已批准） |
+| R5 | 视觉采纳 | diff 行背景带 + 左指示条；行号 gutter 列；命令 `$` 前缀 + 错误红色。**不含**字号/容器皮肤变更（保留现有字号与配色） |
+| R6 | Markdown 类（`web_fetch` / `web_search`） | 同一个 16 行窗口 + 原生滚动，去掉展开按钮 |
+
+### 设计
+
+- 统一滚动容器（`src/web/toolViews/` 内共享组件）：高度 = 16 × 行高，`overflow-y: auto`；**行高与容器引用同一个 CSS 变量**，保证「16 行」精确而不是近似。行高沿用现有主题，不因本次修订改字号。
+- shiki 集成：`shiki/core` + `createHighlighterCore` + JS 引擎（避免 wasm 静态资源）+ 按需语言/主题；语言由 `args.path` 扩展名推断（`read`/`write`/`edit`），无法推断时用纯文本；高亮异步未就绪时渲染纯文本，尺寸不变以避免跳动。
+- 语言覆盖按体积控制：ts / tsx / js / jsx / json / md / py / sh / bash / css / html / yaml / go / rs，其余兑底 `text`。
+- diff 行背景带 + 左指示条；`edit` 保留「首个改动在第 N 行」。
+- `bash`：命令显示为 `$ <command>`（`$` 用 muted 色），stderr 与错误用红色。
+- 变更前后均记录 `npm run build` 的体积差异（可核对）。
+
+### 风险
+
+| 风险 | 说明 | 缓解 |
+| --- | --- | --- |
+| Markdown 类仍全量渲染 | 固定高度只是视觉受限，长正文（p90 21KB）仍在 DOM 里 | 文案明确「共 N 行，可滚动查看」；后续如需再评估虚拟化 |
+| shiki 异步加载 | 首屏可能短暂显示纯文本 | 加载中与加载后行高一致，避免跳动；不做 spinner |
+| 新依赖 | 改变 `package-lock.json`，与之前契约的「不新增依赖」相反 | 开发者已明确批准本次新增；仅新增 `shiki`，不引入其它库 |
+| 16 行的精确性 | 行高不一致会出现 15 或 17 行 | 容器与行共用一个行高变量，并有测试断言 |
