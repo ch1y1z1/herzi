@@ -74,6 +74,13 @@
 - 契约覆盖七个重点：白名单可否被畸形 `details` 绕过、解析器会否输出错值（含 `read` marker 两份正则一致性）、bridge 手抄副本漂移、前端只读性与外链安全、范围与既有行为不变、复现 flaky 测试、六种降级路径。
 - 已发送 prompt 并通过 `herdr agent get` 确认 `working`，Integrator 停止等待并交回控制。
 
+### Reviewer 重建（2026-09-18，开发者误关后）
+
+- 开发者误关 Reviewer 进程。核实：`herzi_toolreview` 已不在 live agent 列表；但 pane `w1A:p1` 仍在（`agent_status: unknown`，回到 shell）、review worktree 仍在且 **clean**，Reviewer 未留下任何未提交的半成品，契约文件 `60165cf` 完好。
+- 处理：在同一 pane 用相同名称重启（`herdr agent start herzi_toolreview --kind claude --pane w1A:p1`），claude 未再询问目录信任（已持久化），`interactive_ready: true`。
+- 重新发送同一份 review prompt（并在开头说明「上一进程被意外关闭，无部分结果，从零开始」）；`herdr agent get` 确认 `working`。
+- 未新建 worktree、未改契约、未动产品代码。
+
 ## 未决事项
 
 - Reviewer findings 待裁决（accepted → 退回 Worker 修复；blocking → 修复且复审后才能集成）。
