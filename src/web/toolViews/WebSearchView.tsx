@@ -35,10 +35,17 @@ export function WebSearchView({ item, fallback }: ToolViewProps) {
       </ViewMeta>
       {parsed.preamble && <MarkdownText text={parsed.preamble} />}
       <ol className="result-list">
-        {parsed.entries.map((entry) => (
+        {parsed.entries.map((entry, index) => (
           // `value` keeps the result's own number: the list must not renumber
-          // entries when only some of them were split out.
-          <li className="result-item" key={entry.number} value={entry.number}>
+          // entries when only some of them were split out. HTML discards
+          // `value="0"`, so it is only emitted for a positive number. The key
+          // carries the index as well, because a source that repeats a number
+          // (`1. **A**` twice) would otherwise produce duplicate React keys.
+          <li
+            className="result-item"
+            key={`${entry.number}:${index}`}
+            {...(entry.number > 0 ? { value: entry.number } : {})}
+          >
             <MarkdownText text={entry.text} />
           </li>
         ))}

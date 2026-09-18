@@ -352,6 +352,30 @@ describe("WebSearchView", () => {
     expect(await screen.findByText("plain entry")).toBeTruthy();
   });
 
+  it("keeps the keys unique and omits value 0 when the source repeats a number", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const container = renderView(WebSearchView, {
+        toolName: "web_search",
+        args: { query: "herdr" },
+        result: "1. **First**\n1. **Second**\n0. **Zero**",
+      });
+
+      // The original numbering is kept as-is, including the repeat and the 0;
+      // `0` is not emitted because HTML discards `value="0"`.
+      expect(
+        Array.from(container.querySelectorAll(".result-item")).map((item) =>
+          item.getAttribute("value"),
+        ),
+      ).toEqual(["1", "1", null]);
+      // A repeated number must not produce a duplicate-key warning.
+      expect(error).not.toHaveBeenCalled();
+      expect(await screen.findByText("First")).toBeTruthy();
+    } finally {
+      error.mockRestore();
+    }
+  });
+
   it("renders the raw markdown when no entry can be split out", async () => {
     const container = renderView(WebSearchView, {
       toolName: "web_search",
