@@ -2,12 +2,14 @@ import { createHash } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
 
 import type {
+  ChatDiffLine,
   ChatDividerKind,
   ChatJsonObject,
   ChatMessage,
   ChatPart,
   ChatSnapshot,
   ChatTodosSnapshot,
+  ChatToolDisplay,
   ChatToolResultPayload,
 } from "../shared/protocol.js";
 import { buildTodoSnapshot, isTodoDetails, type TodoDetails } from "../shared/todo-tasks.js";
@@ -167,10 +169,7 @@ function convertActiveBranch(
     branch.map((entry, index) => [entry.id, index] as const),
   );
 
-  const toolResults = new Map<
-    string,
-    { result: unknown; isError: boolean; toolName?: string }
-  >();
+  const toolResults = new Map<string, ToolResultEntry>();
   let todoSource: { details: TodoDetails; updatedAt: number } | undefined;
   for (const entry of branch) {
     const message = entry.message;
@@ -186,10 +185,16 @@ function convertActiveBranch(
     }
     if (message.role !== "toolResult") continue;
     if (!message.toolCallId) continue;
+    const display = projectToolDisplay(
+      message.toolName,
+      message.details,
+      toolResultText(message.content),
+    );
     toolResults.set(message.toolCallId, {
       result: toolResultValue(message.content),
       isError: Boolean(message.isError),
       toolName: message.toolName,
+      ...(display ? { display } : {}),
     });
   }
 
@@ -442,9 +447,17 @@ function attachReasoningDuration(
   );
 }
 
+/** One `toolResult` message as the transcript needs it. */
+interface ToolResultEntry {
+  result: unknown;
+  isError: boolean;
+  toolName?: string;
+  display?: ChatToolDisplay;
+}
+
 function convertContent(
   value: PiMessage["content"],
-  toolResults: Map<string, { result: unknown; isError: boolean }>,
+  toolResults: Map<string, ToolResultEntry>,
 ): ChatPart[] {
   if (typeof value === "string") return value ? [{ type: "text", text: value }] : [];
   if (!Array.isArray(value)) return [];
@@ -494,6 +507,7 @@ function convertContent(
               ? part.arguments
               : {},
           ...(result ? { result: result.result, isError: result.isError } : {}),
+          ...(result?.display ? { display: result.display } : {}),
         },
       ];
     }
@@ -550,6 +564,179 @@ function imageSha256(part: object, data: string): string {
   const hash = createHash("sha256").update(data, "base64").digest("hex");
   imageHashes.set(part, hash);
   return hash;
+}
+
+/**
+ * Line budget for one projected diff. Real `edit` diffs are small (p90 ≈ 4k
+ * characters), so this only fires on a pathological payload; when it does, the
+ * client is told (`truncated`) instead of silently receiving a short diff.
+ */
+const CHAT_DIFF_MAX_LINES = 2_000;
+
+/** Text parts of a tool result, in order, as the projection reads them. */
+function toolResultText(value: PiMessage["content"]): string {
+  if (typeof value === "string") return value;
+  if (!Array.isArray(value)) return "";
+  return value
+    .flatMap((part) =>
+      part.type === "text" && "text" in part && typeof part.text === "string"
+        ? [part.text]
+        : [],
+    )
+    .join("\n");
+}
+
+/**
+ * Whitelisted projection of one tool result's `details` into display metadata.
+ *
+ * `details` is `any`: it may carry large or unrelated fields, and Pi makes no
+ * compatibility promise about it. Only the fields named here are copied, each
+ * after an explicit shape check, and an unrecognised shape means "no display"
+ * so the client falls back to the raw result instead of a guess.
+ */
+export function projectToolDisplay(
+  toolName: string | undefined,
+  details: unknown,
+  resultText: string,
+): ChatToolDisplay | undefined {
+  const record = isRecord(details) ? details : undefined;
+  const display: ChatToolDisplay = {};
+
+  if (toolName === "edit" && record) {
+    const diff = parsePiDisplayDiff(record.diff);
+    if (diff) {
+      const firstChangedLine = nonNegativeInteger(record.firstChangedLine);
+      display.diff = {
+        lines: diff.lines,
+        ...(firstChangedLine !== undefined ? { firstChangedLine } : {}),
+        ...(diff.truncated ? { truncated: true } : {}),
+      };
+    }
+  }
+
+  if ((toolName === "read" || toolName === "bash") && record) {
+    const truncation = projectTruncation(record.truncation);
+    if (truncation) display.truncation = truncation;
+  }
+
+  if (toolName === "read") {
+    const readRange = parseReadRangeSummary(resultText);
+    if (readRange) display.readRange = readRange;
+  }
+
+  if ((toolName === "ffgrep" || toolName === "fffind") && record) {
+    const matchCount = projectMatchCount(record);
+    if (matchCount) display.matchCount = matchCount;
+  }
+
+  return Object.keys(display).length > 0 ? display : undefined;
+}
+
+/**
+ * Parses Pi's display-oriented diff (`generateDiffString`): every line starts
+ * with `+`, `-` or a space, followed by a right-aligned line number and a
+ * space, then the content. Folded-away context is written as a blank line
+ * number plus `...`, and there is no `@@` hunk header (that is `details.patch`,
+ * a different field).
+ *
+ * All-or-nothing: a single line that does not match the format makes the whole
+ * diff unusable, because a partially parsed diff would show wrong line numbers.
+ */
+export function parsePiDisplayDiff(
+  diff: unknown,
+): { lines: ChatDiffLine[]; truncated: boolean } | undefined {
+  if (typeof diff !== "string" || !diff.trim()) return undefined;
+  const raw = diff.split("\n");
+  if (raw.at(-1) === "") raw.pop();
+
+  const lines: ChatDiffLine[] = [];
+  for (const line of raw) {
+    const marker = line[0];
+    if (marker !== "+" && marker !== "-" && marker !== " ") return undefined;
+    const rest = line.slice(1);
+    // Folded context: only reached as the `...` placeholder; a real content
+    // line `...` is preceded by its line number and never trims to just it.
+    if (rest.trim() === "...") {
+      lines.push({ kind: "skip", text: "..." });
+      continue;
+    }
+    const match = /^ *(\d+)(?: (.*))?$/u.exec(rest);
+    if (!match) return undefined;
+    lines.push({
+      kind: marker === "+" ? "add" : marker === "-" ? "remove" : "context",
+      lineNumber: Number(match[1]),
+      text: match[2] ?? "",
+    });
+  }
+  if (!lines.length) return undefined;
+
+  const truncated = lines.length > CHAT_DIFF_MAX_LINES;
+  return {
+    lines: truncated ? lines.slice(0, CHAT_DIFF_MAX_LINES) : lines,
+    truncated,
+  };
+}
+
+/**
+ * Range summary Pi appends to a truncated `read` result. Only the two shapes
+ * Pi actually writes are accepted; anything else yields no range, and the
+ * client then falls back to plain text.
+ */
+const READ_SHOWING_LINES =
+  /^\[Showing lines (\d+)-(\d+) of (\d+)(?: \([^)]*\))?\. Use offset=(\d+) to continue\.\]$/u;
+
+export function parseReadRangeSummary(
+  text: string,
+): ChatToolDisplay["readRange"] | undefined {
+  if (!text) return undefined;
+  const lines = text.split("\n");
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const line = lines[index]?.trim() ?? "";
+    if (!line) continue;
+    const match = READ_SHOWING_LINES.exec(line);
+    if (!match) return undefined;
+    return {
+      from: Number(match[1]),
+      to: Number(match[2]),
+      total: Number(match[3]),
+      nextOffset: Number(match[4]),
+    };
+  }
+  return undefined;
+}
+
+function projectTruncation(
+  value: unknown,
+): ChatToolDisplay["truncation"] | undefined {
+  if (!isRecord(value) || typeof value.truncated !== "boolean") return undefined;
+  const by =
+    value.truncatedBy === "lines" || value.truncatedBy === "bytes"
+      ? value.truncatedBy
+      : undefined;
+  const outputLines = nonNegativeInteger(value.outputLines);
+  const totalLines = nonNegativeInteger(value.totalLines);
+  return {
+    truncated: value.truncated,
+    ...(by ? { by } : {}),
+    ...(outputLines !== undefined ? { outputLines } : {}),
+    ...(totalLines !== undefined ? { totalLines } : {}),
+  };
+}
+
+function projectMatchCount(
+  record: ChatJsonObject,
+): ChatToolDisplay["matchCount"] | undefined {
+  const matched = nonNegativeInteger(record.totalMatched);
+  const files = nonNegativeInteger(record.totalFiles);
+  if (matched === undefined || files === undefined) return undefined;
+  const hasMore = typeof record.hasMore === "boolean" ? record.hasMore : undefined;
+  return { matched, files, ...(hasMore !== undefined ? { hasMore } : {}) };
+}
+
+function nonNegativeInteger(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0
+    ? value
+    : undefined;
 }
 
 function toolResultValue(value: PiMessage["content"]): unknown {

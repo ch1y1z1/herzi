@@ -5,7 +5,12 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { ImageUploadStore } from "./image-upload-store.js";
 import { appendManagedAttachments } from "./managed-attachments.js";
-import { PiSessionReader } from "./pi-session-reader.js";
+import {
+  PiSessionReader,
+  parsePiDisplayDiff,
+  parseReadRangeSummary,
+  projectToolDisplay,
+} from "./pi-session-reader.js";
 
 const testRoots: string[] = [];
 
@@ -730,6 +735,215 @@ describe("PiSessionReader todo snapshots", () => {
   });
 });
 
+describe("PiSessionReader tool display projection", () => {
+  it("projects an edit diff and keeps the raw result", async () => {
+    const sessionPath = await writeSession([
+      ...toolPair(
+        "e1",
+        null,
+        "2026-09-15T00:00:00.000Z",
+        "edit",
+        { path: "src/a.ts" },
+        {
+          diff: [
+            "+ 92 const added = true;",
+            "- 88 const added = false;",
+            "  91 context line",
+            "     ...",
+          ].join("\n"),
+          firstChangedLine: 92,
+          // Not whitelisted: must never reach the client.
+          patch: "@@ -88,2 +92,2 @@",
+          fullOutputPath: "/private/tmp/secret-output.txt",
+          unknownField: { huge: "payload" },
+        },
+        "… replaced 1 block(s) in src/a.ts",
+      ),
+    ]);
+
+    const snapshot = await new PiSessionReader().read("pane-1", sessionPath, false);
+    const part = snapshot.messages[0]?.content[0];
+    expect(part).toMatchObject({
+      type: "tool-call",
+      toolName: "edit",
+      result: "… replaced 1 block(s) in src/a.ts",
+      display: {
+        diff: {
+          firstChangedLine: 92,
+          lines: [
+            { kind: "add", lineNumber: 92, text: "const added = true;" },
+            { kind: "remove", lineNumber: 88, text: "const added = false;" },
+            { kind: "context", lineNumber: 91, text: "context line" },
+            { kind: "skip", text: "..." },
+          ],
+        },
+      },
+    });
+    const display = (part as { display?: unknown }).display as
+      | { diff?: Record<string, unknown> }
+      | undefined;
+    expect(Object.keys(display ?? {})).toEqual(["diff"]);
+    expect(Object.keys(display?.diff ?? {}).sort()).toEqual([
+      "firstChangedLine",
+      "lines",
+    ]);
+  });
+
+  it("projects the read range and truncation metadata", async () => {
+    const sessionPath = await writeSession([
+      ...toolPair(
+        "r1",
+        null,
+        "2026-09-15T00:00:00.000Z",
+        "read",
+        { path: "src/a.ts", offset: 100 },
+        {
+          truncation: {
+            truncated: true,
+            truncatedBy: "lines",
+            outputLines: 100,
+            totalLines: 512,
+            maxLines: 2000,
+            content: "must not be projected",
+          },
+        },
+        "file body\n\n[Showing lines 100-199 of 512. Use offset=200 to continue.]",
+      ),
+    ]);
+
+    const snapshot = await new PiSessionReader().read("pane-1", sessionPath, false);
+    const display = (
+      snapshot.messages[0]?.content[0] as { display?: Record<string, unknown> }
+    )?.display;
+    expect(display).toEqual({
+      truncation: {
+        truncated: true,
+        by: "lines",
+        outputLines: 100,
+        totalLines: 512,
+      },
+      readRange: { from: 100, to: 199, total: 512, nextOffset: 200 },
+    });
+  });
+
+  it("projects the search counters and drops everything else", async () => {
+    const sessionPath = await writeSession([
+      ...toolPair(
+        "g1",
+        null,
+        "2026-09-15T00:00:00.000Z",
+        "ffgrep",
+        { pattern: "needle" },
+        { totalMatched: 12, totalFiles: 4, hasMore: true, pageIndex: 0 },
+        "src/a.ts\n3: needle",
+      ),
+    ]);
+
+    const snapshot = await new PiSessionReader().read("pane-1", sessionPath, false);
+    const display = (
+      snapshot.messages[0]?.content[0] as { display?: Record<string, unknown> }
+    )?.display;
+    expect(display).toEqual({
+      matchCount: { matched: 12, files: 4, hasMore: true },
+    });
+  });
+
+  it("omits the display when nothing was reported", async () => {
+    const sessionPath = await writeSession([
+      ...toolPair(
+        "b1",
+        null,
+        "2026-09-15T00:00:00.000Z",
+        "bash",
+        { command: "echo hi" },
+        undefined,
+        "hi",
+      ),
+    ]);
+
+    const snapshot = await new PiSessionReader().read("pane-1", sessionPath, false);
+    expect(snapshot.messages[0]?.content[0]).not.toHaveProperty("display");
+  });
+});
+
+describe("parsePiDisplayDiff", () => {
+  it("parses added, removed, context and skipped lines", () => {
+    expect(
+      parsePiDisplayDiff(
+        ["+92 const a = 1;", "- 8 const b = 2;", " 91 const c = 3;", "   ..."].join(
+          "\n",
+        ),
+      ),
+    ).toEqual({
+      truncated: false,
+      lines: [
+        { kind: "add", lineNumber: 92, text: "const a = 1;" },
+        { kind: "remove", lineNumber: 8, text: "const b = 2;" },
+        { kind: "context", lineNumber: 91, text: "const c = 3;" },
+        { kind: "skip", text: "..." },
+      ],
+    });
+  });
+
+  it("keeps empty content lines and tolerates a trailing newline", () => {
+    expect(parsePiDisplayDiff(" 7 \n")).toEqual({
+      truncated: false,
+      lines: [{ kind: "context", lineNumber: 7, text: "" }],
+    });
+  });
+
+  it("refuses unknown, partial and empty shapes", () => {
+    expect(parsePiDisplayDiff("@@ -1,2 +1,2 @@\n+x")).toBeUndefined();
+    expect(parsePiDisplayDiff("+92 has a number\n+no number here")).toBeUndefined();
+    expect(parsePiDisplayDiff("")).toBeUndefined();
+    expect(parsePiDisplayDiff("   ")).toBeUndefined();
+    expect(parsePiDisplayDiff(42)).toBeUndefined();
+  });
+});
+
+describe("parseReadRangeSummary", () => {
+  it("parses both range shapes Pi writes", () => {
+    expect(
+      parseReadRangeSummary("body\n\n[Showing lines 100-199 of 512. Use offset=200 to continue.]"),
+    ).toEqual({ from: 100, to: 199, total: 512, nextOffset: 200 });
+    expect(
+      parseReadRangeSummary(
+        "body\n\n[Showing lines 1-2000 of 9000 (50KB limit). Use offset=2001 to continue.]\n",
+      ),
+    ).toEqual({ from: 1, to: 2000, total: 9000, nextOffset: 2001 });
+  });
+
+  it("returns no range for other trailing text", () => {
+    expect(parseReadRangeSummary("body")).toBeUndefined();
+    expect(parseReadRangeSummary("body\n\n[4 more lines in file. Use offset=9 to continue.]")).toBeUndefined();
+    expect(parseReadRangeSummary("[Showing lines 1-2 of 3.]")).toBeUndefined();
+    expect(parseReadRangeSummary("")).toBeUndefined();
+  });
+});
+
+describe("projectToolDisplay", () => {
+  it("returns undefined for tools without a projection", () => {
+    expect(projectToolDisplay("web_search", { anything: 1 }, "text")).toBeUndefined();
+    expect(projectToolDisplay(undefined, undefined, "text")).toBeUndefined();
+    expect(projectToolDisplay("bash", "not-an-object", "text")).toBeUndefined();
+  });
+
+  it("refuses a partially reported diff instead of guessing", () => {
+    expect(projectToolDisplay("edit", { diff: "@@ nope" }, "")).toBeUndefined();
+    expect(projectToolDisplay("edit", { firstChangedLine: 3 }, "")).toBeUndefined();
+  });
+
+  it("still reads the range when the tool reported no details", () => {
+    expect(
+      projectToolDisplay(
+        "read",
+        undefined,
+        "body\n\n[Showing lines 2-3 of 9. Use offset=4 to continue.]",
+      ),
+    ).toEqual({ readRange: { from: 2, to: 3, total: 9, nextOffset: 4 } });
+  });
+});
+
 async function writeSession(entries: unknown[]): Promise<string> {
   const root = await mkdtemp(path.join(process.cwd(), ".tmp-herzi-session-test-"));
   testRoots.push(root);
@@ -811,6 +1025,8 @@ function toolResultEntry(
   timestamp: string,
   toolName: string,
   details: unknown,
+  content: unknown = "ok",
+  callId = `call-${id}`,
 ) {
   return {
     type: "message",
@@ -819,13 +1035,60 @@ function toolResultEntry(
     timestamp,
     message: {
       role: "toolResult",
-      toolCallId: `call-${id}`,
+      toolCallId: callId,
       toolName,
       isError: false,
-      content: "ok",
+      content,
       ...(details === undefined ? {} : { details }),
     },
   };
+}
+
+/** Assistant entry carrying one tool call, so a result can be attached to it. */
+function toolCallEntry(
+  id: string,
+  parentId: string | null,
+  timestamp: string,
+  toolName: string,
+  args: Record<string, unknown>,
+  callId = `call-${id}`,
+) {
+  return {
+    type: "message",
+    id,
+    parentId,
+    timestamp,
+    message: {
+      role: "assistant",
+      timestamp: Date.parse(timestamp),
+      stopReason: "stop",
+      content: [{ type: "toolCall", id: callId, name: toolName, arguments: args }],
+    },
+  };
+}
+
+/** Assistant entry + matching result entry, written as one pair. */
+function toolPair(
+  id: string,
+  parentId: string | null,
+  timestamp: string,
+  toolName: string,
+  args: Record<string, unknown>,
+  details: unknown,
+  content: unknown = "ok",
+) {
+  return [
+    toolCallEntry(id, parentId, timestamp, toolName, args),
+    toolResultEntry(
+      `${id}-result`,
+      id,
+      timestamp,
+      toolName,
+      details,
+      content,
+      `call-${id}`,
+    ),
+  ];
 }
 
 function todoEntry(

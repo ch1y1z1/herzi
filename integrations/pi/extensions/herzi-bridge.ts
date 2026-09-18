@@ -12,7 +12,39 @@ type ChatPart =
       args: JsonObject;
       result?: unknown;
       isError?: boolean;
+      display?: ChatToolDisplay;
     };
+
+/**
+ * Mirrors `ChatToolDisplay` in `src/shared/protocol.ts`.
+ *
+ * The bridge is installed as a standalone Pi package (`pi install
+ * ./integrations/pi`), so it cannot import from the Herzi sources; the types
+ * and the projection below are therefore kept in sync by hand. The canonical
+ * implementation — with the format notes and the tests — lives in
+ * `src/server/pi-session-reader.ts` (`projectToolDisplay`); change both.
+ */
+type ChatDiffLine = {
+  kind: "add" | "remove" | "context" | "skip";
+  lineNumber?: number;
+  text: string;
+};
+
+type ChatToolDisplay = {
+  diff?: {
+    lines: ChatDiffLine[];
+    firstChangedLine?: number;
+    truncated?: boolean;
+  };
+  truncation?: {
+    truncated: boolean;
+    by?: "lines" | "bytes";
+    outputLines?: number;
+    totalLines?: number;
+  };
+  readRange?: { from: number; to: number; total?: number; nextOffset?: number };
+  matchCount?: { matched: number; files: number; hasMore?: boolean };
+};
 
 interface ChatMessage {
   id: string;
@@ -50,6 +82,7 @@ type BridgeEvent =
         status: "running" | "complete";
         result?: unknown;
         isError?: boolean;
+        display?: ChatToolDisplay;
       };
     }
   | {
@@ -410,17 +443,20 @@ export default function herziBridge(pi: PiApiLike): void {
 
   pi.on("tool_execution_end", (event, ctx) => {
     if (!rootSession || typeof event.toolCallId !== "string") return;
+    const toolName = typeof event.toolName === "string" ? event.toolName : "tool";
+    const display = projectToolDisplay(toolName, event.result);
     queue(
       `tool:${event.toolCallId}`,
       {
         type: "tool",
         tool: {
           toolCallId: event.toolCallId,
-          toolName: typeof event.toolName === "string" ? event.toolName : "tool",
+          toolName,
           args: {},
           status: "complete",
           result: toolResultValue(event.result),
           isError: event.isError === true,
+          ...(display ? { display } : {}),
         },
       },
       ctx,
@@ -540,6 +576,153 @@ function statusFromStopReason(value: unknown): ChatMessage["status"] {
     default:
       return { type: "complete", reason: "unknown" };
   }
+}
+
+/**
+ * Live-path counterpart of `projectToolDisplay` in
+ * `src/server/pi-session-reader.ts`. It must produce the same structure, or a
+ * running card and the same card after the JSONL entry lands would render
+ * differently.
+ */
+function projectToolDisplay(
+  toolName: string,
+  result: unknown,
+): ChatToolDisplay | undefined {
+  const details =
+    isRecord(result) && isRecord(result.details) ? result.details : undefined;
+  const display: ChatToolDisplay = {};
+
+  if (toolName === "edit" && details) {
+    const diff = parsePiDisplayDiff(details.diff);
+    if (diff) {
+      const firstChangedLine = nonNegativeInteger(details.firstChangedLine);
+      display.diff = {
+        lines: diff.lines,
+        ...(firstChangedLine !== undefined ? { firstChangedLine } : {}),
+        ...(diff.truncated ? { truncated: true } : {}),
+      };
+    }
+  }
+
+  if ((toolName === "read" || toolName === "bash") && details) {
+    const truncation = projectTruncation(details.truncation);
+    if (truncation) display.truncation = truncation;
+  }
+
+  if (toolName === "read") {
+    const readRange = parseReadRangeSummary(toolResultText(result));
+    if (readRange) display.readRange = readRange;
+  }
+
+  if ((toolName === "ffgrep" || toolName === "fffind") && details) {
+    const matched = nonNegativeInteger(details.totalMatched);
+    const files = nonNegativeInteger(details.totalFiles);
+    if (matched !== undefined && files !== undefined) {
+      display.matchCount = {
+        matched,
+        files,
+        ...(typeof details.hasMore === "boolean" ? { hasMore: details.hasMore } : {}),
+      };
+    }
+  }
+
+  return Object.keys(display).length > 0 ? display : undefined;
+}
+
+const DIFF_MAX_LINES = 2_000;
+
+function parsePiDisplayDiff(
+  value: unknown,
+): { lines: ChatDiffLine[]; truncated: boolean } | undefined {
+  if (typeof value !== "string" || !value.trim()) return undefined;
+  const raw = value.split("\n");
+  if (raw.at(-1) === "") raw.pop();
+
+  const lines: ChatDiffLine[] = [];
+  for (const line of raw) {
+    const marker = line[0];
+    if (marker !== "+" && marker !== "-" && marker !== " ") return undefined;
+    const rest = line.slice(1);
+    if (rest.trim() === "...") {
+      lines.push({ kind: "skip", text: "..." });
+      continue;
+    }
+    const match = /^ *(\d+)(?: (.*))?$/u.exec(rest);
+    if (!match) return undefined;
+    lines.push({
+      kind: marker === "+" ? "add" : marker === "-" ? "remove" : "context",
+      lineNumber: Number(match[1]),
+      text: match[2] ?? "",
+    });
+  }
+  if (!lines.length) return undefined;
+
+  const truncated = lines.length > DIFF_MAX_LINES;
+  return {
+    lines: truncated ? lines.slice(0, DIFF_MAX_LINES) : lines,
+    truncated,
+  };
+}
+
+const READ_SHOWING_LINES =
+  /^\[Showing lines (\d+)-(\d+) of (\d+)(?: \([^)]*\))?\. Use offset=(\d+) to continue\.\]$/u;
+
+function parseReadRangeSummary(
+  text: string,
+): ChatToolDisplay["readRange"] | undefined {
+  if (!text) return undefined;
+  const lines = text.split("\n");
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const line = lines[index]?.trim() ?? "";
+    if (!line) continue;
+    const match = READ_SHOWING_LINES.exec(line);
+    if (!match) return undefined;
+    return {
+      from: Number(match[1]),
+      to: Number(match[2]),
+      total: Number(match[3]),
+      nextOffset: Number(match[4]),
+    };
+  }
+  return undefined;
+}
+
+function projectTruncation(
+  value: unknown,
+): ChatToolDisplay["truncation"] | undefined {
+  if (!isRecord(value) || typeof value.truncated !== "boolean") return undefined;
+  const by =
+    value.truncatedBy === "lines" || value.truncatedBy === "bytes"
+      ? value.truncatedBy
+      : undefined;
+  const outputLines = nonNegativeInteger(value.outputLines);
+  const totalLines = nonNegativeInteger(value.totalLines);
+  return {
+    truncated: value.truncated,
+    ...(by ? { by } : {}),
+    ...(outputLines !== undefined ? { outputLines } : {}),
+    ...(totalLines !== undefined ? { totalLines } : {}),
+  };
+}
+
+function nonNegativeInteger(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0
+    ? value
+    : undefined;
+}
+
+function toolResultText(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (isRecord(value) && Array.isArray(value.content)) {
+    return value.content
+      .flatMap((part) =>
+        isRecord(part) && part.type === "text" && typeof part.text === "string"
+          ? [part.text]
+          : [],
+      )
+      .join("\n");
+  }
+  return "";
 }
 
 function toolResultValue(value: unknown): unknown {
