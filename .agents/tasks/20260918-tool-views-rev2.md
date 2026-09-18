@@ -140,10 +140,11 @@ npm run build
 
 - 新增 `src/web/toolViews/ScrollBox.tsx`，六个内容视图（`CodeView`/`DiffView`/`OutputView`/`WebFetchView`/`WebSearchView`/`MatchListView`）全部改用；`bash` 的命令块与输出块各用一个（同级，不嵌套）。
 - CSS：`.tool-view-scroll` 定义 `--tool-view-line-height: calc(10.5px * 1.55)`，自身用 `max-height: calc(16 * var(--tool-view-line-height))` + `overflow-y: auto`；`.code-body`/`.diff-body`/`.match-line-*`/`.path-list` 的行高全部引用同一变量，`.code-line` 用同一变量做 `min-height`。容器**无 padding / border**（全局 `box-sizing: border-box`，否则会吃掉 16 行）；滚动条不隐藏。
-- **与契约字面的一处偏离（已获开发者确认）**：契约 §4.1/§11 写“高度 = 恰好 16 行”，R2 写“仅限高”，Memoh 实际实现是 `max-h-*`。我原本给出 `height`（固定 16 行）与 `max-height`（最多 16 行）两案，开发者选择 **`max-height`（限高）**：短内容（`edit` diff 实测中位 147 字符）不会浮在 260px 空盒子里，超出时正好 16 行可滚动。`styles.test.ts` 同时断言 16 与行高引用同一变量，且 `16 == SCROLL_BOX_LINES`。
+- **与契约字面的一处偏离（已获开发者确认）**：契约 §4.1/§11 写“高度 = 恰好 16 行”，R2 写“仅限高”，Memoh 实际实现是 `max-h-*`。我原本给出 `height`（固定 16 行）与 `max-height`（最多 16 行）两案，开发者选择 **`max-height`（限高）**：短内容（`edit` diff 实测中位 147 字符）不会浮在 260px 空盒子里，超出时正好 16 行可滚动。`styles.test.ts` 同时断言 16 与行高引用同一变量，且 `16 == SCROLL_WINDOW_LINES`。
+  - **表述更正（审查 F2，见 §11.2）**：准确说法是“**窗口高 16 个代码行**”，不是“每个视图可见 16 行”。这一处的“超出时正好 16 行”只对行高均匀的视图（`read`/`write`、`bash`）成立；`edit`（含 skip 行）约 14–15 行、多文件 `ffgrep` 约 9–10 行、Markdown 类约 12–13 行（上限 16）。
 - `bash` 输出**打开即在底部**（开发者确认）：`ScrollBox followTail` 用 `ResizeObserver` 兜住“挂载时还在闭合的 `<details>` 里、scrollHeight 为 0”的情况；用户主动向上滚动后不再被拉回，滚回底部恢复跟随。
 - R3：`ExpandButton` 整体删除（含 `common.tsx` 导出），所有 `expanded` 状态与「展开全部/收起」按钮删除；行数文案改中性：`共 N 行`，超出窗口时补 `· 可滚动查看`（`lineCountNote`）。相关地，`toolText.ts` 的 `tailLines`/`LineSlice` 与对应测试一并删除——它们只为旧的“尾部 20 行 + 展开”存在，留着就是死代码。
-- **不改动项（有意保留）**：通用降级详情 `.tool-detail pre` 仍是 `max-height: 320px`。R1/§4.1 限定的是列出的六个内容视图，通用 Arguments/Result 不在其中；若也要 16 行，请单独指示。
+- **不改动项（有意保留）**：通用降级详情 `.tool-detail pre` 仍是 `max-height: 320px`。R1/§4.1 限定的是列出的六个内容视图，通用 Arguments/Result 不在其中；若也要 16 行，请单独指示。→ **已被 §11.1.2 取代**：审查 F4 + 开发者裁决要求通用详情也进同一个窗口，320px 与 `<pre>` 自身的滚动已删除。
 
 ### 9.4 视觉（R5）与 Chat 正文（R7）
 
@@ -151,6 +152,7 @@ npm run build
 - gutter 列改为固定 `flex: 0 0 3.4em` + 右对齐 + `user-select: none`。
 - `bash` 命令行显示 `$ <command>`，`$` 为独立 muted 元素且 `user-select: none`。
 - **错误红色的落点（已获开发者确认）**：`ChatView.tsx:1450` 的既有不变量是 `if (item.isError || !View) return fallback;`，即失败的调用根本不进专属视图。因此做了两步：① 视图内按 `item.isError` 渲染 `.output-error`（真实失败调用走不到，但视图契约完整且有测试）；② `styles.css` 增加 `.tool-error .tool-detail pre { color: #c2635d }`，让真实失败调用的 Error 正文可见变红（代价：该详情里的 Arguments 段也一起变红，开发者已知悉并接受）。
+  - **已修订（审查 F1，见 §11.1.1）**：② 的写法在 activity 分组场景会泄漏到组内**成功**调用（分组级 `tool-error` 是共同祖先），现已改为把红色绑在失败结果自己的 section 上（`.tool-result-error pre`），Arguments 段也不再变红。
 - **stderr 无法单独染色**：真实 `bash` 结果文本里没有 stderr 标记（设计文档 §4.2 实测 `exit code` 命中率 0%），所以只按 `isError` 上色，不做文本猜测。
 - 行内 code、LaTeX、表格、链接策略、`Worked for` 分组、投递状态、todo 条**未改动**。
 - R7 的接入点在 `src/web/markdownPlugins.ts`：给 `markdownShared.components` 加 `SyntaxHighlighter: ShikiCodeBlock`（assistant-ui 官方的 fenced block 钩子，行内 code 不经过该钩子，天然不受影响）。因此 **`src/web/components/ChatView.tsx` 一行未改**，也没有第二套 markdown 配置。
@@ -172,7 +174,7 @@ npm run build
 | `npm install shiki` | PASS（新增 `shiki@4.4.3`，`package.json` 只多一行） |
 | `npx vitest run src/web/toolViews src/web/components/ChatView.test.tsx` | **PASS** — 4 files / 140 tests |
 | `npm run typecheck` | **PASS**（无输出） |
-| `npm test` | **PASS** — 20 files / 298 tests |
+| `npm test` | **PASS** — 20 files / 298 tests（首跑曾出现 1 次既有 flake，见 §11.1 F5；修复后连跑 6 次全 PASS） |
 | `npm run build` | **PASS**（`rm -rf dist` 后构建；typecheck + server + web 全过） |
 
 新增/更新的测试按契约 §7 逐条对应：
@@ -182,7 +184,7 @@ npm run build
 | 语言推断（路径 / fence info / 未知 → `text`） | `highlight.test.ts`（含大小写、查询串、点文件、`Object.prototype` 名） |
 | 逐行结构转换 | `highlight.test.ts`（token 拼接 == 原行；两个主题颜色不同而文本相同） |
 | 高亮未就绪的纯文本降级 | `views.test.tsx`（首次渲染即为纯文本、无 inline color，随后出现 token 颜色且行数不变）；不支持语言恒为纯文本；`highlight.test.ts` 覆盖 `text`/未知/空输入/CRLF |
-| 16 行容器与行高同一变量 | `styles.test.ts`（`--tool-view-line-height` 定义、`max-height: calc(16 * var(...))`、4 处行高引用；并断言 `16 == SCROLL_BOX_LINES`） |
+| 16 行容器与行高同一变量 | `styles.test.ts`（`--tool-view-line-height` 定义、`max-height: calc(16 * var(...))`、4 处行高引用；并断言 `16 == SCROLL_WINDOW_LINES`）。**仅为源码层断言**：jsdom 不解析自定义属性与级联，没有任何测试量过渲染高度；实际可见内容行数见 §11.2 |
 | 展开按钮已移除 | `views.test.tsx` `expandControls()` 在 Code/Diff/Output/WebFetch 断言为空；`ChatView.test.tsx` 断言整页无该按钮；`styles.test.ts` 断言无 `.tool-view-expand` |
 | diff 行 kind → 背景/指示条类名映射 | `views.test.tsx`（四种 kind 的 className 精确列表）+ `styles.test.ts`（add/remove 有底色与 `inset 3px 0 0`，无 `.diff-line-context` 规则） |
 | 命令 `$` 前缀 | `views.test.tsx`（`.output-prompt` == `"$ "`、命令文本不变）+ `styles.test.ts`（muted + `user-select: none`） |
@@ -214,3 +216,100 @@ npm run build
 - 每类高亮降级都不显示 spinner；若 `shiki` chunk 加载失败（例如网络被拦截），界面就是纯文本，没有任何提示——这是契约要求的降级形态，但如果希望有一次性可见提示，需要另外决策。
 - 未做的事（与契约 §5 一致）：虚拟滚动、字号/配色体系调整、服务端投影改动、P3 宿主文件读取、真实浏览器/Pane 验收。
 
+
+## 11. 独立审查后的修复（2026-09-18，第二轮）
+
+审查记录：`review-20260918-tool-views-rev2:.agents/tasks/20260918-tool-views-rev2-review.md`（结论「需修复后合入」，8 条）。开发者逐条裁决，本节只记录按裁决执行的结果。
+
+### 11.1 逐条处置
+
+| 编号 | 裁决 | 处置 |
+| --- | --- | --- |
+| F1 | 必修：红色限定到失败项自身 | **已改**（见 11.1.1） |
+| F2 | 不改布局：表述改为「窗口高 16 行」 | **已改表述**（见 11.2）。UI 里本来没有任何「16 行」文案（行数文案是 `共 N 行 · 可滚动查看`），所以 ① 无 UI 改动，只改了代码注释与常量名：`SCROLL_BOX_LINES` → `SCROLL_WINDOW_LINES`，`ScrollBox` 头部注释与 `lineCountNote` 注释改为「窗口高 16 个代码行」并说明各视图可见行数更少 |
+| F4 | 通用降级详情纳入同一滚动窗口 | **已改**（见 11.1.2） |
+| F5 | 收窄 `promptCalls()` 匹配 | **已改**：`/\/prompt(?:[?#]|$)/`，并注明这是既有 flaky 的修复（见 11.1.3） |
+| F7 | 不改代码，记为已知项 | **不改代码**，已补入 11.4 已知限制（含审查实测数字） |
+| F6 | 不改代码；记录更正由 Integrator 做 | **不改代码**；§10.2 的数字更正留给 Integrator：正确事实是「首次高亮会下载 **2 个**主题（github-light 11.18 kB + github-dark-default 14.43 kB，同属 GitHub 家族）」以及「语言 chunk 实测 **15 个**（13 个语言中 css、javascript 各多一个 59/66 B 的 re-export 壳）」 |
+| F3 | 记录补「仅源码层断言」 | **已补**：§10.1 表格该行已加注；§11.5 再次列出 |
+| F8 | 记录/文档层面，Integrator 处理 | **未改**（`docs/` 不在本轮允许范围），仅在此记明 R7/R8 见本文件 §2 |
+
+#### 11.1.1 F1：红色绑定到失败结果自身
+
+- 我选的方案：在 `GenericToolDetail` 把 `isError` 传给 `ToolResultData`，由后者在 **Result section 自己**上打 `tool-result-error`（成功时只有 `tool-result`），CSS 规则改为 `.tool-result-error pre { color: #c2635d }`。
+- 为什么不是裁决里举例的 `.tool-error .tool-result pre`：`.tool-error` 也挂在 **activity 分组**上（`ChatView.tsx:1338`，只要组内有一个失败就加），而分组的 `.tool-detail` 子树里包含所有**成功**子行。所以以 `.tool-error` 为祖先的写法（无论后面接 `.tool-result` 还是 `.tool-detail pre`）都会继续把成功兄弟的结果染红 —— 换汤不换药。把状态放在失败项自己的节点上，不依赖任何祖先，既满足「限定到失败项自身」，也不会在将来新增容器形态时静默失效。
+- 顺带收窄：Arguments 段回到灰色，只有错误正文是红的（原先的记录代价「Arguments 也一起变红」已消失）。
+- 分组 summary 的红图标**未改**（`.tool-error .tool-state` 原样保留）。
+- 可证伪：把 CSS 规则改回 `.tool-error .tool-detail pre` → `styles.test.ts`「keys the error red on the failing result, not on an ancestor (F1)」FAIL（`stylesheet has no rule for .tool-result-error pre`）；把 `tool-result-error` 类去掉 → `ChatView.test.tsx` 同名用例 FAIL（`expected [] to have a length of 1 but got +0`）。两次实验后均已还原（md5 校验一致）。
+
+#### 11.1.2 F4：通用降级详情进同一个窗口
+
+- `ChatView.tsx` 的 `ToolData` / `ToolResultData` 现在各把一个 `ScrollBox` 包在 `<pre>` 外，section 加上 `tool-data` / `tool-result` 类（后者也是 F1 的钩子）。
+- 同时删掉 `.tool-detail pre { max-height: 320px; overflow: auto }` 的两条声明（并删掉随之失效的 `.tool-view pre { max-height: none; overflow: visible }`）：现在整个面板里**没有任何 `<pre>` 自己是滚动容器**，限高只由 `.tool-view-scroll` 一处负责。`.tool-view-scroll` 自带 `--tool-view-line-height` 定义，不依赖 `.tool-view` 祖先，所以失败/未知/解析失败的路径同样拿到 16 行窗口。
+- 注意：这超出了原契约「ChatView.tsx 仅 fenced code block 接入」的限制，是 F1+F4 裁决直接要求的改动（两处都在通用详情渲染函数里），已在 §11.6 记为范围说明。
+- 可证伪：把两个 `ScrollBox` 去掉 → `ChatView.test.tsx`「bounds the generic Arguments/Result detail with the shared window (F4)」FAIL（`expected [] to have a length of 2 but got +0`）；`styles.test.ts`「is bounded by the shared window, not by a scrolling `<pre>`」会在 CSS 回退时 FAIL。已还原（md5 一致）。
+- 成功路径未受影响：六个已注册视图的窗口与 `bash`/`diff` 等既有断言全部照旧通过（§11.3）。
+
+#### 11.1.3 F5：既有 flaky 的修复
+
+- `promptCalls()` 原来用 `String(url).includes("/prompt")`，把 `/api/prompt-delivery/events`（300ms 后的 trace 上传）也算成一次 prompt 调用；负载高时它落进「No automatic retry」的 30ms 等待窗口，测试就误报。
+- 改为 `/\/prompt(?:[?#]|$)/u`（只匹配 prompt 端点本身）。这是既有测试缺陷，与 Rev.2 产品代码无关；修复后 `npm test` 连跑 6 次全 PASS（§11.3）。
+
+### 11.2 F2：窗口高 16 行，不是「可见 16 行」
+
+表述统一为「**窗口高 16 个代码行**」（`16 × --tool-view-line-height = 16 × 16.275px = 260.4px`）。各视图实际可见的**内容行数**因为自身行高/间距不同而不同，量级如下（CSS 算术，非渲染实测）：
+
+| 视图 | 可见内容行数（量级） | 依据 |
+| --- | --- | --- |
+| `read` / `write`（CodeView） | **16** | `.code-line` 的 `min-height` 就是变量、行间无 gap → 唯一精确的情形 |
+| `bash`（OutputView 输出块） | **16**（长行折行时更少） | `<pre>` 走 `.tool-detail pre { line-height: 1.55 }`，数值上恰好 = 10.5 × 1.55；`white-space: pre-wrap` 下长行折行会占更多高度 |
+| `edit`（DiffView，含 skip 行） | **约 14–15** | 每个 `⋯ 略过的上下文` 行 = 16.275 + 2×1px 虚线边框 + 2×2px margin ≈ 22.3px，3 个 skip 行多花约 18px |
+| `ffgrep`（MatchListView 匹配块，多文件） | **约 9–10** | 文件头 `.match-file-path` 未设行高，继承 `.chat-message { line-height: 1.68 }`（10.5px → 17.64px）；`.match-body { gap: 7px }`、`.match-file { gap: 1px }`。按设计文档 §5.4.2 的真实形状（4 个文件）估算：文件头 4×17.64 + gap 3×7 + 文件内 4×1 ≈ 95.6px，余下 164.8px ÷ 16.275 ≈ 10 行 |
+| `fffind`（路径列表） | **约 15** | `.path-list` 行高 = 变量（16.275px）+ `gap: 1px` → 17.275px/行，260.4 ÷ 17.275 ≈ 15.1 |
+| `web_fetch` / `web_search`（Markdown） | **≤ 16，实际约 12–13** | `.tool-view .markdown-body` 是 12px，行距继承 `.chat-message`/`.activity-message` 的 `1.68`（≈20.2px/行）；再叠加段落间距、标题、代码块，实际更少 |
+| 通用 Arguments/Result 详情（F4 之后） | Argument/Result 各自约 16 行 | `<pre>` 走 `.tool-detail pre` 的 1.55（同上，数值等于变量） |
+
+**第二处独立行高来源**：`.tool-detail pre { line-height: 1.55 }` 与 `--tool-view-line-height: calc(10.5px * 1.55)` 是两处独立字面量，数值上相等所以现在也是 16 行，但改一处另一处不会跟随。审查建议把它也改成 `var(--tool-view-line-height)`；开发者这次的裁决是「不改布局 + 记录说明」，因此本轮**保持原样**并在此记录。将来若要统一，这是一行改动且**零视觉变化**（10.5px × 1.55 与变量值完全相等），前提是变量得提升到 `.tool-detail` 一级（否则不在滚动窗口内的 `<pre>` 拿不到变量）。
+
+**`可滚动查看` 文案的边界**：提示阈值是「行数 > 窗口高（16 行）」。像多文件 `ffgrep` 这种「行数少但行高大」的正文会滚动却不显示提示——属于保守（宁可少提示，不误报可滚动），已在 `lineCountNote` 注释里写明。
+
+### 11.3 验证（全部实测，第二轮）
+
+| 命令 | 结果 |
+| --- | --- |
+| `npx vitest run src/web/toolViews src/web/components/ChatView.test.tsx` | **PASS** — 5 files / 142 tests；连跑 3 次全 PASS |
+| `npm run typecheck` | **PASS**（无输出） |
+| `npm test` | **PASS** — 20 files / **303 tests**；连跑 **6 次全 PASS**（F5 要求 ≥5 次） |
+| `npm run build` | **PASS**（`rm -rf dist` 后构建，typecheck + server + web 全过） |
+| F1 可证伪实验 | 回退 CSS 规则 → 目标用例 **FAIL**；回退 `tool-result-error` 类 → 目标用例 **FAIL**；两次均已还原（md5 一致，随后全绿） |
+| F4 可证伪实验 | 去掉两个 `ScrollBox` → 目标用例 **FAIL**（`got +0`）；已还原 |
+
+新增测试（+5）：`styles.test.ts` 2 条（错误红绑定到结果自身而不是祖先、通用详情由窗口限高且窗口自包含）+ `ChatView.test.tsx` 2 条（通用详情进窗口、错误分组里只标记失败项自己的结果）+ F1 CSS 断言并入原有错误红用例。
+
+build 体积（第二轮交付 vs 第一轮交付 `91519de`，同法 `rm -rf dist && npm run build`）：
+
+| 产物 | 第一轮 | 第二轮 | 差值 |
+| --- | --- | --- | --- |
+| `index-*.js` | 544877 B | 544877 B | 0 |
+| `ChatView-*.js` | 776005 B | 776159 B | **+154 B** |
+| `index-*.css` | 66317 B | 66232 B | **−85 B** |
+
+按需 chunk（shiki 内核/引擎/语言/主题）与本轮无关，未变化；F6 的记录更正见 11.1。
+
+### 11.4 已知限制（本轮新增/补记）
+
+- **F7（开发者决定记为已知项，不改代码）**：`highlightLines` 里的 `codeToTokens` 在主线程同步执行且没有大小上限（LRU 只按 64 **条**、不按字节）。审查在 Node 25 + shiki 4.4.3 + JS 引擎下的实测：100 行 46ms、500 行 126ms、**2000 行约 400ms**、**8000 行约 1.45s**（约 0.18ms/行；首行数字含内核/引擎/主题冷启动约 410ms），缓存命中 0.0–0.6ms。触发面是 Chat 正文或 `web_fetch` 正文里的超长 fenced code block（模型输出与网页正文都没有上限；`read` 的结果本身由 Pi 截断）。若将来要收敛，最小改法是加行数阈值（超过就直接返回 `undefined` 走纯文本，符合既有降级语义）。
+- **记录更正留给 Integrator（F6）**：见 11.1 表格最后两行的「记录更正」栏。
+- **F3 未改变**：`styles.test.ts` 是读源码的断言，不能证明渲染高度（§10.1 已加注）。
+
+### 11.5 未验证项（与第一轮相同，未因修复而改变）
+
+- **仍未做真实浏览器与真实 Pane 验收**（未授权）：F1（红色是否只落在失败项）、F2（各视图实际可见行数、子像素取整）、F4（通用详情的滚动条观感）都只有 DOM/CSS 源码层与算术证据，**没有一处真实渲染测量**。
+- jsdom 不做级联与布局：F1 的「红色不再泄漏」在 jsdom 里无法用计算样式验证（审查已实测确认 jsdom 连 `.tool-error .tool-detail pre` 都不生效），所以本轮用「错误标记只出现在失败项的结果 section（DOM 断言）+ 规则不再以祖先为键（CSS 断言）」两条替代证据；两者都能被回退实验证伪（11.3），但仍不等于真实浏览器里的颜色验证。
+- `bash` 尾部跟随仍只测了逻辑（`ResizeObserver` 由 stub 驱动），真实 `<details>` 展开触发观察器这一环未实测。
+
+### 11.6 范围说明
+
+- 本轮改动：`src/web/components/ChatView.tsx`（仅 `GenericToolDetail` / `ToolData` / `ToolResultData` 三处，F1+F4 裁决要求的通用详情渲染）、`src/web/components/ChatView.test.tsx`、`src/web/styles.css`、`src/web/toolViews/ScrollBox.tsx`（注释与常量改名）、`src/web/toolViews/common.tsx`（注释）、`src/web/styles.test.ts`、本文件。
+- 其余一切未动：无新增依赖、无 `src/server/**`、`src/shared/**`、`integrations/**`、`docs/**` 改动，未运行 `npm run dev`，未做任何 Git 破坏性操作。
+- `ChatView.tsx` 的折叠行、分组规则、`Worked for`、投递状态、todo 条逻辑仍然一行未改（改动只在通用工具详情的渲染分支内）。
