@@ -42,6 +42,16 @@ function texts(container: Element, selector: string): string[] {
   );
 }
 
+/**
+ * `展开全部` / `收起` controls left in the rendered views. R3 removed all of them,
+ * so every view test can assert this is empty instead of trusting one label.
+ */
+function expandControls(container: Element): Element[] {
+  return Array.from(container.querySelectorAll("button")).filter((button) =>
+    /展开全部|收起/u.test(button.textContent ?? ""),
+  );
+}
+
 describe("DiffView", () => {
   const item: ToolDetailItem = {
     toolName: "edit",
@@ -93,6 +103,35 @@ describe("DiffView", () => {
     const container = renderView(DiffView, { toolName: "edit", args: {} });
     expect(container.querySelector(".test-fallback")).toBeTruthy();
   });
+
+  it("maps every line kind to the row class that carries its band and bar", () => {
+    const container = renderView(DiffView, {
+      ...item,
+      args: { path: "src/a.ts" },
+    });
+
+    // The row class is the whole hook the stylesheet hangs the band and the 3px
+    // left bar on (see styles.test.ts for those rules).
+    expect(
+      Array.from(container.querySelectorAll(".diff-line")).map(
+        (row) => row.className,
+      ),
+    ).toEqual([
+      "diff-line diff-line-add",
+      "diff-line diff-line-remove",
+      "diff-line diff-line-context",
+      "diff-line diff-line-skip",
+    ]);
+    expect(expandControls(container)).toEqual([]);
+  });
+
+  it("keeps a gutter cell on every row, including the skipped one", () => {
+    const container = renderView(DiffView, item);
+    // The bar is painted inside the row, so the gutter column of a changed row
+    // stays aligned with the context rows.
+    expect(container.querySelectorAll(".diff-line-number")).toHaveLength(3);
+    expect(container.querySelector(".diff-line-skip .diff-line-number")).toBeNull();
+  });
 });
 
 describe("CodeView", () => {
@@ -133,7 +172,7 @@ describe("CodeView", () => {
     expect(texts(container, ".code-line-text")).toEqual(["one line"]);
   });
 
-  it("folds long content and expands it on request", () => {
+  it("keeps every line in the DOM and puts them behind a scroll window", () => {
     const lines = Array.from({ length: 250 }, (_value, index) => `line ${index + 1}`);
     const container = renderView(CodeView, {
       toolName: "read",
@@ -141,10 +180,62 @@ describe("CodeView", () => {
       result: lines.join("\n"),
     });
 
-    expect(container.querySelectorAll(".code-line")).toHaveLength(200);
-    fireEvent.click(screen.getByRole("button", { name: /还有 50 行未显示/ }));
+    // R1/R2: nothing is folded and nothing is virtualized — all 250 rows exist.
     expect(container.querySelectorAll(".code-line")).toHaveLength(250);
-    expect(screen.getByRole("button", { name: "收起" })).toBeTruthy();
+    expect(container.querySelectorAll(".tool-view-scroll")).toHaveLength(1);
+    expect(screen.getByText("读取内容 · 共 250 行 · 可滚动查看")).toBeTruthy();
+    // R3: the expand/collapse controls are gone, not merely hidden.
+    expect(expandControls(container)).toEqual([]);
+  });
+
+  it("counts the lines without claiming a scroll window for short content", () => {
+    const container = renderView(CodeView, {
+      toolName: "read",
+      args: { path: "src/a.ts" },
+      result: "one\ntwo",
+    });
+
+    expect(screen.getByText("读取内容 · 共 2 行")).toBeTruthy();
+    expect(container.textContent).not.toContain("可滚动查看");
+  });
+
+  it("renders plain text until the highlighter is ready, then token colors", async () => {
+    const container = renderView(CodeView, {
+      toolName: "read",
+      args: { path: "src/a.ts" },
+      result: "const value = 1;\nconst other = 2;",
+    });
+
+    // The first paint is the plain text that is already available: the row count
+    // and the text are the same as the highlighted version would be, so nothing
+    // jumps when the colors arrive (and there is no spinner).
+    expect(texts(container, ".code-line-text")).toEqual([
+      "const value = 1;",
+      "const other = 2;",
+    ]);
+    expect(container.querySelector('.code-line-text span[style*="color"]')).toBeNull();
+
+    await waitFor(() =>
+      expect(
+        container.querySelector('.code-line-text span[style*="color"]'),
+      ).toBeTruthy(),
+    );
+    expect(container.querySelectorAll(".code-line")).toHaveLength(2);
+    expect(texts(container, ".code-line-text")).toEqual([
+      "const value = 1;",
+      "const other = 2;",
+    ]);
+  });
+
+  it("stays plain text for a language outside the supported set", () => {
+    const container = renderView(CodeView, {
+      toolName: "read",
+      args: { path: "notes.txt" },
+      result: "plain words only",
+    });
+
+    expect(texts(container, ".code-line-text")).toEqual(["plain words only"]);
+    expect(container.querySelector('.code-line-text span[style*="color"]')).toBeNull();
   });
 
   it("shows the new content for write instead of a diff", () => {
@@ -181,7 +272,7 @@ describe("CodeView", () => {
 });
 
 describe("OutputView", () => {
-  it("shows the command and the last 20 output lines, never an exit code", () => {
+  it("shows the command with a `$` prompt and all output, never an exit code", () => {
     const lines = Array.from({ length: 25 }, (_value, index) => `output line ${index + 1}`);
     const container = renderView(OutputView, {
       toolName: "bash",
@@ -189,26 +280,56 @@ describe("OutputView", () => {
       result: lines.join("\n"),
     });
 
-    expect(screen.getByText("npm test")).toBeTruthy();
+    // R5: the prompt is a separate, muted element, the command itself unchanged.
+    expect(container.querySelector(".output-prompt")?.textContent).toBe("$ ");
+    expect(container.querySelector(".output-command-text")?.textContent).toBe("npm test");
+    // R1/R2: the whole output is in the DOM and scrolls in the window.
     const output = container.querySelector(".output-body pre")?.textContent ?? "";
+    expect(output).toContain("output line 1");
     expect(output).toContain("output line 25");
-    expect(output).not.toContain("output line 1\n");
-    expect(screen.getByRole("button", { name: /还有前 5 行未显示/ })).toBeTruthy();
+    expect(container.querySelectorAll(".tool-view-scroll")).toHaveLength(2);
+    expect(screen.getByText("输出 · 共 25 行 · 可滚动查看")).toBeTruthy();
+    expect(expandControls(container)).toEqual([]);
     // The result text has no exit status, so none is claimed.
     expect(container.textContent).not.toMatch(/退出码|exit code/iu);
   });
 
-  it("expands to the full output on request", () => {
-    const lines = Array.from({ length: 25 }, (_value, index) => `line ${index + 1}`);
+  it("leaves the `$` prompt out of the text selection", () => {
     const container = renderView(OutputView, {
       toolName: "bash",
       args: { command: "npm test" },
-      result: lines.join("\n"),
+      result: "ok",
     });
 
-    fireEvent.click(screen.getByRole("button", { name: /展开全部/ }));
-    const output = container.querySelector(".output-body pre")?.textContent ?? "";
-    expect(output).toContain("line 1\n");
+    // The prompt is its own element, styled muted and non-selectable in
+    // styles.test.ts; the command text next to it is untouched.
+    expect(container.querySelector(".output-prompt")?.textContent).toBe("$ ");
+    expect(container.querySelector(".output-command-text")?.textContent).toBe(
+      "npm test",
+    );
+  });
+
+  it("marks a failed call red instead of the usual gray", () => {
+    const container = renderView(OutputView, {
+      toolName: "bash",
+      args: { command: "npm test" },
+      result: "Error: command failed",
+      isError: true,
+    });
+
+    // The class the red rule hangs on (see styles.test.ts for the color and for
+    // the generic error detail, which real failed calls take instead).
+    expect(container.querySelectorAll(".output-body pre.output-error")).toHaveLength(1);
+  });
+
+  it("keeps an unfailed call gray", () => {
+    const container = renderView(OutputView, {
+      toolName: "bash",
+      args: { command: "npm test" },
+      result: "ok",
+    });
+
+    expect(container.querySelector(".output-error")).toBeNull();
   });
 
   it("renders the truncation metadata when the tool reported it", () => {
@@ -419,7 +540,7 @@ describe("WebFetchView", () => {
     expect(container.querySelector(".test-fallback")).toBeNull();
   });
 
-  it("folds a long body and expands it on request", () => {
+  it("scrolls a long body in the shared window instead of folding it", () => {
     const body = Array.from({ length: 60 }, (_value, index) => `Body ${index + 1}`).join("\n\n");
     const container = renderView(WebFetchView, {
       toolName: "web_fetch",
@@ -427,11 +548,10 @@ describe("WebFetchView", () => {
       result: body,
     });
 
-    // 60 Markdown paragraphs fold to the first 40 of the 83 result lines.
-    expect(screen.getByRole("button", { name: /展开全部/ })).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: /展开全部/ }));
-    expect(screen.getByRole("button", { name: "收起" })).toBeTruthy();
-    expect(container).toBeTruthy();
+    expect(container.querySelectorAll(".tool-view-scroll")).toHaveLength(1);
+    // 60 paragraphs joined by blank lines: 60 text lines plus 59 empty ones.
+    expect(screen.getByText("共 119 行 · 可滚动查看")).toBeTruthy();
+    expect(expandControls(container)).toEqual([]);
   });
 });
 

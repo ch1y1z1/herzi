@@ -39,27 +39,13 @@ export function toolResultText(result: unknown): string | undefined {
   return undefined;
 }
 
-export interface LineSlice {
-  lines: string[];
-  /** How many lines were dropped from the head. */
-  hidden: number;
-}
-
 /**
- * The last `limit` lines of `text`.
+ * Splits `text` into display lines, dropping only the final-newline artifact.
  *
- * A single trailing empty entry (the artifact of a final newline) is dropped so
- * that a result ending with `\n` is not reported as one line longer than it is.
- */
-export function tailLines(text: string, limit: number): LineSlice {
-  const lines = text.split("\n");
-  if (lines.length > 1 && lines.at(-1) === "") lines.pop();
-  if (lines.length <= limit) return { lines, hidden: 0 };
-  return { lines: lines.slice(-limit), hidden: lines.length - limit };
-}
-
-/** Splits `text` into display lines, dropping only the final-newline artifact. */
-export function resultLines(text: string): string[] {
+ * This is the single line split of every view: the same array is handed to the
+ * highlighter and rendered row by row, so highlighting can never change how many
+ * rows a result has.
+ */export function resultLines(text: string): string[] {
   const lines = text.split("\n");
   if (lines.length > 1 && lines.at(-1) === "") lines.pop();
   return lines;

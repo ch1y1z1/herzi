@@ -110,3 +110,107 @@ npm run build
 ## 8. 记录要求
 
 在本文件追加「过程与决策」「验证与交接」两节：包括 shiki 版本与主题名、bundle 体积前后对比、任何偏离与理由、剩余风险与未验证项。完成后保持 worktree clean，提交 1–3 个清晰 commit，留在 Pane 等开发者通知 Integrator。
+
+## 9. 过程与决策
+
+### 9.1 依赖与主题（R4）
+
+- 新增依赖：`shiki@4.4.3`（`^4.4.3`）——`package.json` / `package-lock.json` 全场唯一变化，无其它新增/升级；核对方式：`git diff package.json`（只多一行）与 `git diff --stat package-lock.json`（+194 行）。
+- 接入方式：`shiki/core` 的 `createHighlighterCore` + `shiki/engine/javascript` 的 `createJavaScriptRegexEngine({ forgiving: true })`，无 wasm 静态资源、无额外构建配置。
+- **主题用了两个**（契约要求记录主题名）：
+  - 工具详情视图（浅色面板 `#f1f2ed`）：**`github-light`**。
+  - Chat 正文 fenced code block（深色 `#20231f`）：**`github-dark-default`**，其默认前景 `#e6edf3` 与现有 `#e7e8e2` 最接近。
+  - 为什么不是一个：R8 明确不改容器皮肤/配色体系，工具视图在浅色面板上不能铺深色代码底；契约 §4.2 的缓存键本来就写作 `(code, lang, theme)`，说明主题是按面（surface）取的。两个主题同属 GitHub 家族，观感协调。
+  - 主题自带的背景色一律**不使用**：浅色面板与 `#20231f` 代码底保持现状。
+- **字体色规则**：token 颜色等于主题前景色时丢弃该颜色，让文字继承现有样式（视图 `#5e635a`，Chat 代码块 `#e7e8e2`），即“只叠加语法强调色”。这是 R8（不改字号与正文配色）在实现层最直接的做法，也让 diff 新增/删除行的绿/红文字色在未着色 token 上保留。
+- 语言覆盖为契约列出的 13 个 shiki 语言（ts/tsx/js/jsx/json/md/py/sh+bash/css/html/yaml/go/rs，`sh` 与 `bash` 同为 `shellscript`），其余一律 `text`；`languageForPath` / `languageForFence` / `highlightLines` 的实现要求逐条落地，另外处理了两个真实边界：`.env` 这类点文件不算扩展名；fence info 的 `tsx{1,3}`、`ts title=...` 只取语言部分。
+- 查找用 `Object.hasOwn`（与 `toolCatalog` 一致），```` ```constructor ```` 之类的 fence 不会命中原型链。
+
+### 9.2 高亮内核（新增 `src/web/highlight.ts` + `src/web/highlightReact.tsx`）
+
+- 逐行结构：`highlightLines(lines, lang, theme)` 接收**调用方自己的行数组**（不重新切行），返回同样长度的 token 行；调用方按行渲染，因此高亮前后行数、行高、滚动位置都一致，不需要 spinner，也不会跳动。
+- 降级：语言不在支持集、语言/主题/内核加载失败、tokenizer 抛错、空输入，全部返回 `undefined` → 纯文本。宿主 `HighlightedText` 还会校验“token 拼接 == 该行真实文本”，不一致就退回纯文本，避免渲染出与真实内容不符的文字。
+- 缓存：`(code, lang, theme)` 为键的 LRU 64 条（`null` 表示“已确认无法高亮”，避免每帧重试），另有 in-flight 去重。`resetHighlightCache` / `resetHighlighter` 仅测试使用。
+- CRLF：行尾 `
+` 视为行终止符（shiki 切分时也会丢掉它），两侧用同一个 `codeLineText` 规范化，CRLF 文件不会因文本不一致而整体丢失高亮。
+- diff 高亮是**尽力而为**：diff 不是一段连续代码，所以按行内容整段 tokenize（行数一一对应），跨行结构（多行字符串/注释）的颜色不保证准确；但这只影响颜色，不影响文字。已写进代码注释。
+- 内核与引擎本身也按需 `import()`：没有任何代码需要高亮时，`shiki/core`、引擎、语言、主题一个都不下载。
+
+### 9.3 滚动窗口（R1/R2/R3/R6）
+
+- 新增 `src/web/toolViews/ScrollBox.tsx`，六个内容视图（`CodeView`/`DiffView`/`OutputView`/`WebFetchView`/`WebSearchView`/`MatchListView`）全部改用；`bash` 的命令块与输出块各用一个（同级，不嵌套）。
+- CSS：`.tool-view-scroll` 定义 `--tool-view-line-height: calc(10.5px * 1.55)`，自身用 `max-height: calc(16 * var(--tool-view-line-height))` + `overflow-y: auto`；`.code-body`/`.diff-body`/`.match-line-*`/`.path-list` 的行高全部引用同一变量，`.code-line` 用同一变量做 `min-height`。容器**无 padding / border**（全局 `box-sizing: border-box`，否则会吃掉 16 行）；滚动条不隐藏。
+- **与契约字面的一处偏离（已获开发者确认）**：契约 §4.1/§11 写“高度 = 恰好 16 行”，R2 写“仅限高”，Memoh 实际实现是 `max-h-*`。我原本给出 `height`（固定 16 行）与 `max-height`（最多 16 行）两案，开发者选择 **`max-height`（限高）**：短内容（`edit` diff 实测中位 147 字符）不会浮在 260px 空盒子里，超出时正好 16 行可滚动。`styles.test.ts` 同时断言 16 与行高引用同一变量，且 `16 == SCROLL_BOX_LINES`。
+- `bash` 输出**打开即在底部**（开发者确认）：`ScrollBox followTail` 用 `ResizeObserver` 兜住“挂载时还在闭合的 `<details>` 里、scrollHeight 为 0”的情况；用户主动向上滚动后不再被拉回，滚回底部恢复跟随。
+- R3：`ExpandButton` 整体删除（含 `common.tsx` 导出），所有 `expanded` 状态与「展开全部/收起」按钮删除；行数文案改中性：`共 N 行`，超出窗口时补 `· 可滚动查看`（`lineCountNote`）。相关地，`toolText.ts` 的 `tailLines`/`LineSlice` 与对应测试一并删除——它们只为旧的“尾部 20 行 + 展开”存在，留着就是死代码。
+- **不改动项（有意保留）**：通用降级详情 `.tool-detail pre` 仍是 `max-height: 320px`。R1/§4.1 限定的是列出的六个内容视图，通用 Arguments/Result 不在其中；若也要 16 行，请单独指示。
+
+### 9.4 视觉（R5）与 Chat 正文（R7）
+
+- diff：新增/删除行整行底色（沿用 `#e8f0e2` / `#f6e8e7`）+ 左侧 3px 实心指示条，用 `box-shadow: inset 3px 0 0` 而不是 `border-left`，避免该行 gutter 列相对上下文行右移 3px；上下文行无底色（没有 `.diff-line-context` 规则）。旧/新文件行号沿用服务端投影的 `lineNumber`（既有行为，未改）。
+- gutter 列改为固定 `flex: 0 0 3.4em` + 右对齐 + `user-select: none`。
+- `bash` 命令行显示 `$ <command>`，`$` 为独立 muted 元素且 `user-select: none`。
+- **错误红色的落点（已获开发者确认）**：`ChatView.tsx:1450` 的既有不变量是 `if (item.isError || !View) return fallback;`，即失败的调用根本不进专属视图。因此做了两步：① 视图内按 `item.isError` 渲染 `.output-error`（真实失败调用走不到，但视图契约完整且有测试）；② `styles.css` 增加 `.tool-error .tool-detail pre { color: #c2635d }`，让真实失败调用的 Error 正文可见变红（代价：该详情里的 Arguments 段也一起变红，开发者已知悉并接受）。
+- **stderr 无法单独染色**：真实 `bash` 结果文本里没有 stderr 标记（设计文档 §4.2 实测 `exit code` 命中率 0%），所以只按 `isError` 上色，不做文本猜测。
+- 行内 code、LaTeX、表格、链接策略、`Worked for` 分组、投递状态、todo 条**未改动**。
+- R7 的接入点在 `src/web/markdownPlugins.ts`：给 `markdownShared.components` 加 `SyntaxHighlighter: ShikiCodeBlock`（assistant-ui 官方的 fenced block 钩子，行内 code 不经过该钩子，天然不受影响）。因此 **`src/web/components/ChatView.tsx` 一行未改**，也没有第二套 markdown 配置。
+- **解释（记录在案）**：R7 只说“接入同一高亮内核”。Chat 正文代码块因此**只加高亮、不加高度窗口**——`.markdown-body pre` 的深色底、padding、横向滚动保持原样（Memoh 的 CodeBlock 有 `max-h-48`，但 R8 与 §4.4 都要求 Chat 正文除高亮外不变）。如果希望 Chat 里的代码块也限高，请单独指示。
+
+### 9.5 写入范围
+
+- 实际改动：`package.json`、`package-lock.json`、`src/web/styles.css`、`src/web/markdownPlugins.ts`、`src/web/highlight.ts`(新)、`src/web/highlightReact.tsx`(新)、`src/web/highlight.test.ts`(新)、`src/web/styles.test.ts`(新)、`src/web/toolViews/**`（含 6 个视图、`common.tsx`、`toolText.ts`、`ScrollBox.tsx`(新) 与测试）。
+- `src/server/**`、`src/shared/**`、`integrations/**`、`src/web/components/ChatView.tsx` 均未改动（本轮零服务端、零协议变化）。
+- 未运行 `npm run dev`，未做任何 Git 破坏性操作，未接触真实 Pane / 真实会话数据。
+
+## 10. 验证与交接
+
+### 10.1 命令与结果（全部在 worktree 实测）
+
+| 命令 | 结果 |
+| --- | --- |
+| `npm ci` | PASS（exit 0；缺 node_modules，按锁文件安装） |
+| `npm install shiki` | PASS（新增 `shiki@4.4.3`，`package.json` 只多一行） |
+| `npx vitest run src/web/toolViews src/web/components/ChatView.test.tsx` | **PASS** — 4 files / 140 tests |
+| `npm run typecheck` | **PASS**（无输出） |
+| `npm test` | **PASS** — 20 files / 298 tests |
+| `npm run build` | **PASS**（`rm -rf dist` 后构建；typecheck + server + web 全过） |
+
+新增/更新的测试按契约 §7 逐条对应：
+
+| 契约要求 | 位置 |
+| --- | --- |
+| 语言推断（路径 / fence info / 未知 → `text`） | `highlight.test.ts`（含大小写、查询串、点文件、`Object.prototype` 名） |
+| 逐行结构转换 | `highlight.test.ts`（token 拼接 == 原行；两个主题颜色不同而文本相同） |
+| 高亮未就绪的纯文本降级 | `views.test.tsx`（首次渲染即为纯文本、无 inline color，随后出现 token 颜色且行数不变）；不支持语言恒为纯文本；`highlight.test.ts` 覆盖 `text`/未知/空输入/CRLF |
+| 16 行容器与行高同一变量 | `styles.test.ts`（`--tool-view-line-height` 定义、`max-height: calc(16 * var(...))`、4 处行高引用；并断言 `16 == SCROLL_BOX_LINES`） |
+| 展开按钮已移除 | `views.test.tsx` `expandControls()` 在 Code/Diff/Output/WebFetch 断言为空；`ChatView.test.tsx` 断言整页无该按钮；`styles.test.ts` 断言无 `.tool-view-expand` |
+| diff 行 kind → 背景/指示条类名映射 | `views.test.tsx`（四种 kind 的 className 精确列表）+ `styles.test.ts`（add/remove 有底色与 `inset 3px 0 0`，无 `.diff-line-context` 规则） |
+| 命令 `$` 前缀 | `views.test.tsx`（`.output-prompt` == `"$ "`、命令文本不变）+ `styles.test.ts`（muted + `user-select: none`） |
+| 错误红色 | `views.test.tsx`（`.output-body pre.output-error`）+ `styles.test.ts`（`#c2635d`，且特异性高于 `.tool-detail pre` 的灰） |
+| Chat 正文代码块接入同一内核（R7） | `ChatView.test.tsx`：fenced block 渲染出 `.code-block-line`、文本与 fence 内容一致、随后出现 token 颜色；行内 code 无 block 行**（端到端，真实内核）** |
+| 尾部跟随 | `scrollBox.test.tsx`（打开即在底部、用户上滚后不被拉走、回到底部恢复跟随；用 stub 的 `ResizeObserver` 驱动） |
+
+### 10.2 bundle 体积对比（同一方法：`rm -rf dist && npm run build`）
+
+| 产物 | 变更前 | 变更后 | 差值 |
+| --- | --- | --- | --- |
+| `index-*.js` | 544.87 kB（gzip 151.47） | 544.87 kB（gzip 151.47） | **+3 B**（实质不变） |
+| `ChatView-*.js` | 771.73 kB（gzip 230.27） | 776.00 kB（gzip 232.08） | **+4.17 kB**（gzip +1.81 kB） |
+| `index-*.css` | 65.79 kB（gzip 17.30） | 66.31 kB（gzip 17.45） | **+0.51 kB** |
+| 新增 `core-*.js` | — | 93.56 kB（gzip 29.48） | 按需 |
+| 新增 `engine-javascript-*.js` | — | 57.63 kB（gzip 20.18） | 按需 |
+| 新增语言 chunk（13 个） | — | 2.81 kB（json）～181.07 kB（typescript）（gzip 0.77～16.62） | 按需 |
+| 新增主题 chunk（2 个） | — | 11.18 kB（github-light）/ 14.43 kB（github-dark-default） | 按需 |
+
+首屏（`index` + `ChatView` + CSS）只多了约 4.7 kB：`shiki` 的内核、引擎、语言、主题全部在按需 chunk 里，只有真正要显示高亮代码时才下载（本地服务，且此后由浏览器缓存）。首次高亮的实际下载量约为 core + engine + 1 个语言 + 1 个主题。
+
+### 10.3 未验证项与剩余风险
+
+- **未做真实浏览器验收，也未做真实 Pane 验收**（未授权）。所有结论来自 jsdom 测试、typecheck、build 与源码阅读，页面观感（滚动条是否明显、浅色主题配色是否好看、`max-height` 下短内容的高度）**未在真实浏览器中确认**。
+- **计算样式未实测**：`styles.test.ts` 是对 `styles.css` 源码的断言（jsdom 不解析自定义属性与级联）。也就是说“16 行”在实现与源码层面被锁住，但没有一行代码真的测量过渲染出来的高度。**建议 Integrator 在授权的 synthetic 环境里打开一个 read 工具详情，目视确认约 16 行、且滚动条可见。**
+- **尾部跟随只测了逻辑**：`ResizeObserver` 在 jsdom 里不存在，测试用 stub 驱动；真实浏览器里 `<details>` 展开触发观察者回调这一环未实测。若真实环境不生效，表现为 bash 输出窗口停在顶部（不跳动、不报错）。
+- **Markdown 类视图的高度单位是代码行**：`web_fetch`/`web_search` 的容器高按 16 × 代码行高（16.275px），而其中 Markdown 自身行距是 12px/1.5（R8 不改），所以可见的 Markdown 行数略少于 16。这是“容器高度与行高引用同一变量”的直接结果，已在验收时说明。
+- diff 的跨行结构（多行字符串/注释）高亮不保证准确，只影响颜色；`ffgrep`/`fffind`/`bash` 输出不做语法高亮（输出不是源码），因此 `bash` 的红色只表示调用失败，不表示 stderr。
+- 每类高亮降级都不显示 spinner；若 `shiki` chunk 加载失败（例如网络被拦截），界面就是纯文本，没有任何提示——这是契约要求的降级形态，但如果希望有一次性可见提示，需要另外决策。
+- 未做的事（与契约 §5 一致）：虚拟滚动、字号/配色体系调整、服务端投影改动、P3 宿主文件读取、真实浏览器/Pane 验收。
+
