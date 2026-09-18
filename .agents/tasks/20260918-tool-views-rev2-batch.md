@@ -79,6 +79,27 @@
 
 已发送 prompt 并确认 `agent_status: working`；Integrator 停止等待并交回控制。
 
+## 独立 Review 结论与 findings 裁决（2026-09-18）
+
+Reviewer `herzi_rev2review` 完成，记录 commit `3189063`，结论：**需修复后合入**。
+
+**实测推翻的两个风险**（原本最担心的两条）：注入面**不存在**（`highlightReact.tsx` 未用 `dangerouslySetInnerHTML`）；shiki **真的按需**（重新 build 后核实首屏 `index-*.js` 零 shiki 引用）。另：删除彻底、`components.SyntaxHighlighter` 确实是 assistant-ui 支持的钩子（正文高亮真生效）。
+
+**8 条 findings**：
+
+| # | 级别 | 问题 | 开发者裁决 |
+| --- | --- | --- | --- |
+| F1 | medium | `.tool-error .tool-detail pre` 的错误红色泄漏到同一分组内**成功**调用的详情（分组级是祖先，特异性 0,2,1 必胜） | **必修**：红色限定到失败项自身 |
+| F2 | medium | 「16 行」只在 `read`/`write` 精确；`.tool-detail pre` 是第二处独立行高来源，实际 ffgrep 约 9–10 行、diff 14–15 行 | **改文案为「窗口高 16 行」**，不改布局；记录列出各视图实际行数 |
+| F3 | low | `styles.test.ts` 只是读源码正则，证明不了渲染高度（jsdom 不执行级联） | 记录标注「仅源码层」（Integrator） |
+| F4 | low | 通用降级详情仍 320px，形态不一致且多一个滚动容器 | **修**：纳入 16 行窗口 |
+| F5 | low | `npm test` 5 次失败 1 次：`promptCalls()` 把 `/api/prompt-delivery/events` 当成 prompt 调用（**既有**缺陷） | **修**：收窄匹配 |
+| F6 | low | 记录不准：实际下载 2 个主题（光/暗，约 25.6kB）而非 1 个；语言 chunk 15 而非 13 | 不改代码；记录更正（Integrator） |
+| F7 | low | `codeToTokens` 同步执行且无大小上限（2000 行≈400ms、8000 行≈1.45s） | **记为已知项**，不加限制 |
+| F8 | info | `plan §11` 只有 R1–R6，R7/R8 只在 Worker 契约 | 补文档（Integrator） |
+
+**已退回原 Worker 修复**（`herzi_viewrev2`，w1C）：F1 + F2 文案 + F4 + F5，并按裁决把 F7 写入已知限制、F3 注明「仅源码层」。要求提供可证伪证据（回退即失败）与 `npm test` 5 次以上连跑。
+
 ## 下一步（等开发者通知后由 Integrator 执行）
 
 1. 接收交付：范围检查（尤其确认未改 `src/server/**`、`src/shared/**`、依赖只多了 `shiki`）、worktree clean、记录与实际 diff 相符。
