@@ -100,6 +100,41 @@ Reviewer `herzi_rev2review` 完成，记录 commit `3189063`，结论：**需修
 
 **已退回原 Worker 修复**（`herzi_viewrev2`，w1C）：F1 + F2 文案 + F4 + F5，并按裁决把 F7 写入已知限制、F3 注明「仅源码层」。要求提供可证伪证据（回退即失败）与 `npm test` 5 次以上连跑。
 
+## 修复交付与 Integrator 验证（2026-09-18）
+
+**Worker 修复**（`cd316ff` fix + `bf6c04c` 记录；8 文件 +317 / −52）：
+
+- **F1**：新增 `.tool-result-error pre { color }`，`ToolResultData` 只在 `isError` 的 Result section 上打该类（**不再以 `.tool-error` 祖先为键**）；分组 summary 的红图标 `.tool-error .tool-state` 未动；Arguments 段回到灰色（消除了原先记录的“Arguments 也变红”代价）。
+- **F2**：表述统一为「窗口高 16 个代码行」（`16 × --tool-view-line-height = 260.4px`）；无 UI 文案需改（行数文案本来就是 `共 N 行 · 可滚动查看`）；常量改名 `SCROLL_BOX_LINES` → `SCROLL_WINDOW_LINES`；per-view 实际可见行数表写入任务记录 §11.2。
+- **F4**：`ToolData` / `ToolResultData` 的 `<pre>` 各包一层 `ScrollBox`；删除 `.tool-detail pre` 的 `max-height: 320px; overflow: auto` 与随之失效的 `.tool-view pre` 覆盖 —— 面板内**再无任何 `<pre>` 自己是滚动容器**。
+- **F5**：`promptCalls()` 改为 `/\/prompt(?:[?#]|$)/u`（不再把 `/api/prompt-delivery/events` 算成 prompt 调用）。
+- Worker 自报：目标测试 142 PASS ×3；`npm test` 303 PASS ×6；`typecheck` / `build` PASS；F1/F4 各做了可证伪实验（回退即 FAIL，已还原并校验 md5）。体积：`index-*.js` 0 变化，`ChatView-*.js` +154 B，CSS −85 B。
+
+**Integrator 独立验证**：
+
+| 验证 | 结果 |
+| --- | --- |
+| `npm run typecheck` | **PASS** |
+| focused（`toolViews` + `ChatView.test.tsx`）×6 | **PASS**（每次 9–20 s） |
+| `npm test` ×8 | **PASS** |
+| `npm test` ×30 | **PASS** |
+| 累计 | **44 次连续通过** |
+| 但：最初在**重负载**下见过 2 次失败 | focused 那次 `1 failed / 141 passed` 且耗时 **182 s**（正常 9–20 s）；紧接 `npm test` 5 次中第 2 次 `1 failed / 302 passed`。两次均**未保留用例名** |
+
+结论：F5 的修复有效（flake 显著降频），但**不能声称已完全消除**，已交给定向复审独立复跑与定性。
+
+## 定向复审派发（2026-09-18）
+
+| 项目 | 值 |
+| --- | --- |
+| 复审分支 | `review-20260918-tool-views-rev2-r2`（base = 修复后 HEAD `bf6c04c`） |
+| 复审 worktree | `/Users/chiyizi/.herdr/worktrees/herzi/review-20260918-tool-views-rev2-r2` |
+| Herdr | workspace `w1E` / pane `w1E:p1` |
+| Reviewer agent | `herzi_rev2recheck`（pi） |
+| 复审契约 | `.agents/tasks/20260918-tool-views-rev2-review-r2.md`（commit `d082b70`） |
+
+四项必验：F1 是否真不以祖先为键（含可证伪实验）、F2 表述改动是否干净且 per-view 行数表准确、F4 是否真无第二层滚动容器（含可证伪实验）、F5 flake（独立连跑 `npm test` ≥15 次，复现则保留用例名）。已写入 Integrator 观察到但未定位的两次失败事实供其核对。
+
 ## 下一步（等开发者通知后由 Integrator 执行）
 
 1. 接收交付：范围检查（尤其确认未改 `src/server/**`、`src/shared/**`、依赖只多了 `shiki`）、worktree clean、记录与实际 diff 相符。
