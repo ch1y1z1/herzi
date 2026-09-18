@@ -155,7 +155,7 @@ npm run build
 4. **`fffind` 不显示页号**：只显示「还有更多结果未显示」。开发者 2026-09-18 明确选择不加 `matchCount.pageIndex`。
 5. **`question` / `todo` 两个白名单字段是开发者批准的协议新增**（见下「歧义」）：`question` ← `details.answers` / `cancelled` / `globalNote`（answer 条目投影 `questionIndex`/`question`/`kind`/`answer`/`selected`/`notes`，不投影 `preview`/`error`）；`todo` ← `details.action` + `details.params` 的原始字段（`id`/`subject`/`status`/`activeForm`/`description`/`blockedBy`）。**不投影 `details.tasks`**，避免与 composer 上方状态条重复。
 6. **`ask_user_question` 的 `options[].preview` 不渲染**（契约 §2 P2.5 只要求「问题 + 选项 + 用户回答 + 是否取消」）；只渲染 `label` 与 `description`。视图**只读**，无任何回答入口（有测试断言详情区没有 button）。
-7. **体积上限**：`details` 里的字符串截断到 1000 字符并追加 `…`；数组超过 64 项整体拒绝（不是截断）；`answers` 不是数组或条目形状不认识 → 不投影 answers（`cancelled`/`globalNote` 仍独立投影）；project 出的 answers 为空 → 视为「没有投影」而不是「用户没回答」。diff 投影上限 2000 行，超出则截断并标 `truncated: true`。
+7. **体积上限**（2026-09-18 依据 review finding 2/5 修正）：`details` 里的字符串截断到 1000 字符并追加 `…`；**数组内的每个字符串同样裁剪**（否则 64 项超长字符串可到 32 MB），数组超过 64 项整体拒绝（不是截断）；diff 三重上限 = 2000 行 + 单行 2000 字符 + 合计 200 000 字符，任一被触发即标 `truncated: true`（原来只有行数上限，实测 2000 行 × 20 万字符可投影出 400 MB）。answers 规则的实际语义是：**条目不是对象 → 整份 answers 不投影；条目是对象但没有任何可识别字段 → 跳过该条**（`cancelled`/`globalNote` 与 answers 相互独立，仍各自投影）；投影出的 answers 为空 → 视为「没有投影」而不是「用户没回答」。
 8. **`matchCount` 需要两个计数同时是整数**，否则不显示计数（前端退化为按解析出的行数计）。
 9. **`web_fetch` 截断提示出现两次**（meta 行 + 仍在正文里）：不改写原文，正文就是原始 Markdown。
 10. **`read` 行号**：起点 = `args.offset`（正整数）→ `readRange.from` → 1；`offset` 存在但不是正整数 → 完全不显示行号（不猜）。尾部 marker 由前端按 Pi 的两种已知形状剥离（服务端也用同一形状解析 range，两份正则必须同步，见「风险」）。
@@ -221,3 +221,54 @@ npm run build
 - 分支 `agent-20260917-tool-call-detail-ui`，2 个 commit（见上），worktree clean，未 merge / rebase / push。
 - 建议 Review 重点：`ChatToolDisplay` 字段白名单是否有越界语义；`parsePiDisplayDiff` 的 all-or-nothing 策略是否过严；`read` 行号与 marker 剥离的一致性；bridge 手抄副本的维护风险；`question`/`todo` 投影是否漏字段。
 - 留在 Pane 等开发者通知 Integrator，不自行合入 `main`。
+
+---
+
+# Review findings 处置（Worker，2026-09-18）
+
+独立 Reviewer 的评审记录在 review 分支：`.agents/tasks/20260917-tool-call-detail-ui-review.md`（对象 = 我的 `04ed530`），结论**需修复后合入**，6 条 finding。开发者要求我逐条**自行复现验证**后处置。以下每条都先独立复现（`/tmp` 临时脚本，未入库），再决定修或不修；修复后的复验证据一并列在下面。
+
+| # | 严重度 | 结论 | 处置 |
+| --- | --- | --- | --- |
+| 1 | medium | **成立** | 已修：`ToolDetail` 在 `item.isError` 时一律走 Arguments/Error 通用详情 |
+| 2 | medium | **成立** | 已修：diff 增加单行 + 合计字符上限；`boundedStringArray` 逐项裁剪；bridge 同步 + parity 用例 |
+| 3 | low | **成立**（新增路径部分） | 已修：`toolViewFor` 与 `TodoView` 的动作词查找改为 `Object.hasOwn` |
+| 4 | low | **成立**（①已修，②不可修） | 已修：`ffgrep` 单行去掉尾部 `\r`；②文件名为 `12:foo.ts` 的歧义属固有歧义，改为记录 + 文档化 |
+| 5 | info | **成立** | 已修：代码注释与本记录第 7 条改为实现的实际语义 |
+| 6 | info | **成立** | 已修：结果条目保留原文编号（`<li value>`），部分切分时计数文案改为「切分出 N 条结果（其余文字保留在原文中）」 |
+
+## 逐条复现与处置细节
+
+1. **失败调用（medium）** — 复现：`grep -n isError src/web/components/ChatView.tsx` 的命中全部在折叠行/状态图标/`ToolResultData` 标签处，`ToolDetail` 与 `src/web/toolViews/**` 无任何 `isError` 判断（代码依据）；数据侧确认失败 `read` 的结果文本是纯文本错误信息，会被 CodeView 当文件内容加行号渲染，`write`/`todo`/`ask_user_question` 的视图完全不读 `result`，错误原因整张卡片都没有入口。属方案 §10「调用失败要有合理降级」的完成标准缺口。
+   **处置**：`ToolDetail` 增加 `if (item.isError || !View) return fallback;`。选「整张回退」而不是「结构化视图 + 追加错误文本」，因为后者的错误文本仍会被当成被描述的对象（`read` 的「读取内容」、`write` 的「新建内容」、`web_fetch` 的「N 字符正文」），标签本身就是错值。回退后 `Arguments` + `Error` 两段仍保证错误原文可见（新增 ChatView 测试断言 `section label` 为 `["Arguments","Error"]` 且错误文本可见、无 `.code-view`）。折叠行的红色状态与 `tool-error` 类未动（`isError` 语义本身未改）。
+2. **投影体积（medium）** — 复现：`parsePiDisplayDiff` 对 200 行 × 10 万字符的 diff 返回 `truncated: false`，`JSON.stringify(display)` = 20 008 331 B（按行数上限外推 2000 行 × 20 万字符 ≈ 400 MB）；`boundedStringArray` 对 `selected: [64 × 50 万字符]` 逐项不裁剪，投影 32 000 248 B，而同用例里 `answer` 被裁到 1000 字符——同一份结构内两种行为不一致。方案 §8 明写缓解措施是「服务端投影前做体积上限」，实现只做了行数上限。
+   **处置**：`CHAT_DIFF_MAX_LINES=2000` / `CHAT_DIFF_MAX_LINE_CHARS=2000` / `CHAT_DIFF_MAX_CHARS=200000`；单行超限或合计超限即停止并标 `truncated: true`；`boundedStringArray` 复用 `boundedString` 逐项裁剪；bridge 手抄副本同步同样三个上限；服务端测试 + parity 用例各加一组。
+   **复验**：同一输入下 `display` 从 20 008 331 B → 202 206 B（99 行），`truncated: true`；`selected` 从 32 000 248 B → 64 312 B（每项 ≤1001 字符）。
+3. **原型链查找（low）** — 复现：`toolViewFor("constructor") === Object`、`"__proto__"` → `Object.prototype`、`"toString"` → 函数；`src/web` 内无 ErrorBoundary，React 会在渲染期抛错。工具名在服务端只校验是字符串，故畸形 session 可达。
+   **处置**：只修本批新增的两个查找点（`toolViewFor`、`TodoView` 的动作词）——`toolCatalog.ts` 里 `TOOL_META`/`TOOL_DESCRIBERS`/`TODO_ACTIONS` 的同类写法是**既有代码**，且属于契约明令不得改动的折叠行路径，按 Reviewer 自己的建议（「可另开一个小任务，不阻塞本批」）**本批不动**，在此登记为后续项。
+   **复验**：`toolViewFor("constructor"|"__proto__"|"toString"|"hasOwnProperty")` 全部 `undefined`；`todo` 的 `action: "constructor"` 显示原文 `constructor` 而不是函数（新增测试）。
+4. **ffgrep 边界（low）** — ①复现：`parseGrepText("src/a.ts\r\n12: hit\r\n13- ctx\r\n")` → `undefined`（整份失败退回 JSON）；原因是 `.` 与 `looksLikePath` 都不接受 `\r`。②复现：`parseGrepText("12:foo.ts\n1: hit")` → 一个匿名文件组 + 2 条匹配。
+   **处置**：①已修：每行先去掉一个尾部 `\r`（CRLF 的匹配行内容本就属于 CRLF 文件，属现实场景）；②**不可修**：工具把裸路径当文件头，因此文件名为 `12:foo.ts` 的头行与该文件第 12 行内容为 `foo.ts` 的匹配行在文本上完全同形，没有任何信息可区分。选择记录 + 注释说明 + 一条「文档化当前行为」的测试，而不是发明启发式规则（启发式会引入新的错值风险）。
+   **复验**：CRLF 输入现在解析出 1 个文件、1 条匹配 + 1 条上下文。
+5. **注释与实现不一致（info）** — 复现：`{answers:[{answer:"A"},{unknown:1}]}` → `{"answers":[{"answer":"A"}]}`，即「非对象条目才整份放弃，无可识别字段的对象条目只是被跳过」。
+   **处置**：按实现修注释（服务端 + bridge 两份），并把本记录第 7 条的错误描述一并改正。行为本身安全（被跳过的条目不含任何可展示信息），不改实现。
+6. **web_search 计数/编号（info）** — 复现：`parseWebSearchText("1. plain\n2. **bold**")` → `preamble:"1. plain"`、`entries:["**bold**"]`，界面会显示「1 条结果」并把原文第 2 条重新编号为第 1 条。
+   **处置**：条目结构改为 `{ number, text }` 并用 `<li value={number}>` 保留原文编号；`partial`（前导区仍有 `^数字. ` 行）为真时计数文案改为「切分出 N 条结果（其余文字保留在原文中）」。切分规则本身未改（方案 §5.4.3 明示）。
+   **复验**：同一输入 → `entries:[{number:2,...}]`、`partial:true`，界面 `<li value="2">` 且计数文案已加限定。
+
+## 修复后的验证（本轮实测，HEAD 含全部修复）
+
+| # | 命令 | 结果 | 说明 |
+| --- | --- | --- | --- |
+| 1 | `npx vitest run src/web/toolViews src/web/toolCatalog.test.ts src/web/components/ChatView.test.tsx src/server/pi-session-reader.test.ts` | **PASS** | 5 files / 186 tests（修复前 177） |
+| 2 | `npm run typecheck` | **PASS** | `tsc --noEmit` 无输出 |
+| 3 | `npm test` | **PASS** | 17 files / 260 tests |
+| 4 | `npm run build` | **PASS** | `build:server` + `build:web` |
+| 5 | 只读复现脚本（`/tmp`，未入库） | **PASS** | 6 条 finding 的复现与修复后复验证据见上 |
+| 6 | 真实浏览器 / 真实 Pane / 真实 session 验收 | **NOT RUN** | 仍不授权；未读取任何真实 session |
+
+## 仍未处置 / 需 Reviewer 复核
+
+- Finding 3 中 `toolCatalog.ts`（`TOOL_META`/`TOOL_DESCRIBERS`/`TODO_ACTIONS`）的同类原型链查找**本批未改**（既有代码 + 契约禁止改折叠行路径），建议另开小任务。
+- Finding 4 的 ②（文件名为 `12:foo.ts`）**作为固有歧义接受**，已在代码注释与本记录说明；如开发者认为需要更强规则，请指定期望语义（例如「含 `:` 的头行一律当路径」会反过来把匹配行误判成路径）。
+- 上一轮那次未能复现的测试失败仍无新证据；本轮 4 文件命令与 `npm test` 各 1 次通过。

@@ -145,6 +145,36 @@ describe("parseGrepText", () => {
     expect(parseGrepText("")).toBeUndefined();
     expect(parseGrepText("   ")).toBeUndefined();
   });
+
+  it("reads CRLF output instead of failing the whole parse", () => {
+    // A matched line of a CRLF file ends with a carriage return; `.` and
+    // `looksLikePath` both reject it, so the line terminator is stripped first.
+    const parsed = parseGrepText("src/a.ts\r\n12: hit\r\n13- ctx\r\n");
+    expect(parsed?.files).toEqual([
+      {
+        path: "src/a.ts",
+        matches: [
+          { line: 12, text: " hit", isMatch: true },
+          { line: 13, text: " ctx", isMatch: false },
+        ],
+      },
+    ]);
+  });
+
+  it("documents the one file name that is indistinguishable from a match", () => {
+    // The tool prints a bare path as the header, so a file named `12:foo.ts`
+    // produces a line that reads exactly like a match of line 12. Nothing in
+    // the text can tell them apart; the line is read as a match.
+    const parsed = parseGrepText("12:foo.ts\n1: hit");
+    expect(parsed?.files).toEqual([
+      {
+        matches: [
+          { line: 12, text: "foo.ts", isMatch: true },
+          { line: 1, text: " hit", isMatch: true },
+        ],
+      },
+    ]);
+  });
 });
 
 describe("parsePathList", () => {
@@ -174,10 +204,18 @@ describe("parseWebSearchText", () => {
       ].join("\n"),
     );
     expect(parsed?.preamble).toBe("Some preamble");
+    expect(parsed?.partial).toBe(false);
     expect(parsed?.entries).toEqual([
-      "**First**\n   example.com · 2026-01-01",
-      "**Second**\n   other.example",
+      { number: 1, text: "**First**\n   example.com · 2026-01-01" },
+      { number: 2, text: "**Second**\n   other.example" },
     ]);
+  });
+
+  it("keeps the original numbers and flags a partial split", () => {
+    const parsed = parseWebSearchText("1. plain\n2. **bold**");
+    expect(parsed?.partial).toBe(true);
+    expect(parsed?.entries).toEqual([{ number: 2, text: "**bold**" }]);
+    expect(parsed?.preamble).toBe("1. plain");
   });
 
   it("refuses a result without numbered entries and an empty one", () => {

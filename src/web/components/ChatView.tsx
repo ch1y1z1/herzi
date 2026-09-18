@@ -1442,7 +1442,12 @@ function ToolItemRow({ item }: { item: ToolActivityItem }) {
 function ToolDetail({ item }: { item: ToolDetailItem }) {
   const View = toolViewFor(item.toolName);
   const fallback = <GenericToolDetail item={item} />;
-  if (!View) return fallback;
+  // A failed call is not the thing a view describes: its result is an error
+  // message, not a diff, file content or a page. Rendering that text through a
+  // structured view would mislabel it (and for `write`/`todo` it would hide the
+  // reason entirely), so errors always take the generic Arguments/Error detail.
+  // Failing calls are not rare: `bash` failed 217/5192 times in real sessions.
+  if (item.isError || !View) return fallback;
   return <View item={item} fallback={fallback} />;
 }
 

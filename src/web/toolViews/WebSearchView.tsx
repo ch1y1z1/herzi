@@ -27,13 +27,19 @@ export function WebSearchView({ item, fallback }: ToolViewProps) {
   return (
     <div className="tool-view web-search-view">
       <ViewMeta>
-        <ViewNote>{parsed.entries.length} 条结果</ViewNote>
+        <ViewNote>
+          {parsed.partial
+            ? `切分出 ${parsed.entries.length} 条结果（其余文字保留在原文中）`
+            : `${parsed.entries.length} 条结果`}
+        </ViewNote>
       </ViewMeta>
       {parsed.preamble && <MarkdownText text={parsed.preamble} />}
       <ol className="result-list">
-        {parsed.entries.map((entry, index) => (
-          <li className="result-item" key={index}>
-            <MarkdownText text={entry} />
+        {parsed.entries.map((entry) => (
+          // `value` keeps the result's own number: the list must not renumber
+          // entries when only some of them were split out.
+          <li className="result-item" key={entry.number} value={entry.number}>
+            <MarkdownText text={entry.text} />
           </li>
         ))}
       </ol>

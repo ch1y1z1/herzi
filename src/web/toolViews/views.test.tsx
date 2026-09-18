@@ -321,9 +321,35 @@ describe("WebSearchView", () => {
 
     expect(screen.getByText("2 条结果")).toBeTruthy();
     expect(container.querySelectorAll(".result-item")).toHaveLength(2);
+    // The list keeps the results' own numbers.
+    expect(
+      Array.from(container.querySelectorAll(".result-item")).map((item) =>
+        item.getAttribute("value"),
+      ),
+    ).toEqual(["1", "2"]);
     const link = await screen.findByRole("link", { name: "Herdr docs" });
     expect(link.getAttribute("href")).toBe("https://example.com/herdr");
     expect(link.getAttribute("target")).toBe("_blank");
+  });
+
+  it("keeps the original number and says so when only part of the list split", async () => {
+    const container = renderView(WebSearchView, {
+      toolName: "web_search",
+      args: { query: "herdr" },
+      result: "1. plain entry\n2. **Second result**\n   other.example",
+    });
+
+    // The unsplit line stays in the preamble, so the header must not claim the
+    // list has one result, and the surviving entry keeps number 2.
+    expect(
+      screen.getByText("切分出 1 条结果（其余文字保留在原文中）"),
+    ).toBeTruthy();
+    expect(
+      container.querySelector(".result-item")?.getAttribute("value"),
+    ).toBe("2");
+    // The preamble is Markdown, so its own `1. ` becomes a list marker; the
+    // text itself is still shown.
+    expect(await screen.findByText("plain entry")).toBeTruthy();
   });
 
   it("renders the raw markdown when no entry can be split out", async () => {
@@ -528,5 +554,28 @@ describe("toolViewFor", () => {
     expect(toolViewFor("ask_user_question")).toBe(QuestionView);
     expect(toolViewFor("mcp__unknown_tool")).toBeUndefined();
     expect(toolViewFor("")).toBeUndefined();
+  });
+
+  it("does not return inherited members for a tool named after one", () => {
+    // A plain index lookup would return `Object` / `Object.prototype` /
+    // `toString` here, and React would then fail to render the ChatView.
+    for (const name of ["constructor", "__proto__", "toString", "hasOwnProperty"]) {
+      expect(toolViewFor(name), name).toBeUndefined();
+    }
+  });
+});
+
+describe("todo action word", () => {
+  it("shows an unknown action verbatim instead of an inherited member", () => {
+    const container = renderView(TodoView, {
+      toolName: "todo",
+      args: { action: "constructor", id: 1 },
+    });
+
+    // `Object.prototype.constructor` is a function; as a React child it throws.
+    expect(container.querySelector(".tool-view-note")?.textContent).toBe(
+      "constructor",
+    );
+    expect(container.textContent).toContain("#1");
   });
 });

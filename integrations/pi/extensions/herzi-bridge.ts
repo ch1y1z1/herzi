@@ -665,6 +665,10 @@ export function projectToolDisplay(
 }
 
 const DIFF_MAX_LINES = 2_000;
+/** Character budget for one projected diff (the line cap alone bounds nothing). */
+const DIFF_MAX_CHARS = 200_000;
+/** Longest single diff line; a longer line is clipped and marks the diff truncated. */
+const DIFF_MAX_LINE_CHARS = 2_000;
 
 function parsePiDisplayDiff(
   value: unknown,
@@ -673,30 +677,45 @@ function parsePiDisplayDiff(
   const raw = value.split("\n");
   if (raw.at(-1) === "") raw.pop();
 
-  const lines: ChatDiffLine[] = [];
+  const parsed: ChatDiffLine[] = [];
   for (const line of raw) {
     const marker = line[0];
     if (marker !== "+" && marker !== "-" && marker !== " ") return undefined;
     const rest = line.slice(1);
     if (rest.trim() === "...") {
-      lines.push({ kind: "skip", text: "..." });
+      parsed.push({ kind: "skip", text: "..." });
       continue;
     }
     const match = /^ *(\d+)(?: (.*))?$/u.exec(rest);
     if (!match) return undefined;
-    lines.push({
+    parsed.push({
       kind: marker === "+" ? "add" : marker === "-" ? "remove" : "context",
       lineNumber: Number(match[1]),
       text: match[2] ?? "",
     });
   }
-  if (!lines.length) return undefined;
+  if (!parsed.length) return undefined;
 
-  const truncated = lines.length > DIFF_MAX_LINES;
-  return {
-    lines: truncated ? lines.slice(0, DIFF_MAX_LINES) : lines,
-    truncated,
-  };
+  // Payload shaping only: the whole diff had to match the format first.
+  const lines: ChatDiffLine[] = [];
+  let budget = DIFF_MAX_CHARS;
+  let truncated = parsed.length > DIFF_MAX_LINES;
+  for (const line of parsed) {
+    if (lines.length >= DIFF_MAX_LINES) break;
+    const clipped = clipDisplayText(line.text, DIFF_MAX_LINE_CHARS);
+    if (clipped.length > budget) {
+      truncated = true;
+      break;
+    }
+    budget -= clipped.length;
+    if (clipped !== line.text) truncated = true;
+    lines.push(clipped === line.text ? line : { ...line, text: clipped });
+  }
+  return { lines, truncated };
+}
+
+function clipDisplayText(value: string, max: number): string {
+  return value.length > max ? `${value.slice(0, max)}…` : value;
 }
 
 const READ_SHOWING_LINES =
@@ -817,7 +836,9 @@ function boundedString(value: unknown): string | undefined {
 
 function boundedStringArray(value: unknown): string[] | undefined {
   if (!Array.isArray(value) || value.length > DISPLAY_ARRAY_MAX) return undefined;
-  const strings = value.filter((entry): entry is string => typeof entry === "string");
+  const strings = value
+    .map((entry) => boundedString(entry))
+    .filter((entry): entry is string => entry !== undefined);
   return strings.length ? strings : undefined;
 }
 

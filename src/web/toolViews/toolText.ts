@@ -151,6 +151,13 @@ const GREP_CONTEXT_LINE = /^(\d+)-(.*)$/u;
  * All-or-nothing: a line that is neither a match, a context line, a bracketed
  * summary nor a plausible path makes the whole result unparseable, because
  * treating prose as a file header would make the grouping wrong.
+ *
+ * One case is inherently ambiguous and is therefore not "fixed": the tool prints
+ * a bare file path as a header, so a file literally named `12:foo.ts` produces a
+ * header line that is indistinguishable from a match line of line 12 with the
+ * content `foo.ts`. Nothing in the result text can tell the two apart, so the
+ * line is read as a match. Pathological file names only — and a fallback is not
+ * an option here, because the header/matches split is what the view is for.
  */
 export function parseGrepText(text: string): GrepParse | undefined {
   if (!text.trim()) return undefined;
@@ -160,9 +167,12 @@ export function parseGrepText(text: string): GrepParse | undefined {
   let matched = 0;
 
   for (const rawLine of text.split("\n")) {
-    if (!rawLine.trim()) continue;
-    const match = GREP_MATCH_LINE.exec(rawLine);
-    const context = match ? null : GREP_CONTEXT_LINE.exec(rawLine);
+    // A trailing CR (CRLF file content) is a line terminator, not content: `.`
+    // and `looksLikePath` both reject `\r`, which used to fail the whole parse.
+    const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
+    if (!line.trim()) continue;
+    const match = GREP_MATCH_LINE.exec(line);
+    const context = match ? null : GREP_CONTEXT_LINE.exec(line);
     if (match || context) {
       current ??= pushFile(files);
       current.matches.push({
@@ -173,13 +183,13 @@ export function parseGrepText(text: string): GrepParse | undefined {
       if (match) matched += 1;
       continue;
     }
-    const line = rawLine.trim();
-    if (line.startsWith("[") && line.endsWith("]")) {
-      notes.push(line);
+    const trimmed = line.trim();
+    if (trimmed.startsWith("[") && trimmed.endsWith("]")) {
+      notes.push(trimmed);
       continue;
     }
-    if (!looksLikePath(line)) return undefined;
-    current = pushFile(files, line);
+    if (!looksLikePath(trimmed)) return undefined;
+    current = pushFile(files, trimmed);
   }
 
   if (!matched && !files.some((file) => file.matches.length > 0)) return undefined;
@@ -223,34 +233,55 @@ function looksLikePath(line: string): boolean {
   return !/\s/u.test(line) && /[./\\]/u.test(line);
 }
 
+export interface WebSearchEntry {
+  /** The result's own number, so the list keeps the original numbering. */
+  number: number;
+  /** The entry text with its number stripped: `**Title**` plus source lines. */
+  text: string;
+}
+
 export interface WebSearchParse {
   /** Text before the first numbered result; rendered above the list. */
   preamble: string;
-  /** One entry per result, numbering stripped (`**Title**` + source lines). */
-  entries: string[];
+  /** One entry per split result. */
+  entries: WebSearchEntry[];
+  /**
+   * True when numbered-looking lines are still in the preamble, i.e. the split
+   * (98% hit rate on real output) did not cover every result of the list.
+   */
+  partial: boolean;
 }
 
 /** `^\d+.\s+\*\*` starts a result; the measured hit rate on real output is 98%. */
-const WEB_SEARCH_ITEM = /^\d+\.\s+(?=\*\*)/u;
+const WEB_SEARCH_ITEM = /^(\d+)\.\s+(?=\*\*)/u;
+const WEB_SEARCH_NUMBERED = /^\d+\.\s/u;
 
 export function parseWebSearchText(text: string): WebSearchParse | undefined {
   if (!text.trim()) return undefined;
-  const entries: string[] = [];
+  const entries: WebSearchEntry[] = [];
   const preambleLines: string[] = [];
-  let current: string[] | undefined;
+  let current: WebSearchEntry | undefined;
 
   for (const line of text.split("\n")) {
-    if (WEB_SEARCH_ITEM.test(line)) {
-      if (current) entries.push(current.join("\n"));
-      current = [line.replace(/^\d+\.\s+/u, "")];
+    const match = WEB_SEARCH_ITEM.exec(line);
+    if (match) {
+      if (current) entries.push(current);
+      current = {
+        number: Number(match[1]),
+        text: line.replace(/^\d+\.\s+/u, ""),
+      };
       continue;
     }
-    if (current) current.push(line);
+    if (current) current.text += `\n${line}`;
     else preambleLines.push(line);
   }
-  if (current) entries.push(current.join("\n"));
+  if (current) entries.push(current);
   if (!entries.length) return undefined;
-  return { preamble: preambleLines.join("\n").trim(), entries };
+  return {
+    preamble: preambleLines.join("\n").trim(),
+    entries,
+    partial: preambleLines.some((line) => WEB_SEARCH_NUMBERED.test(line)),
+  };
 }
 
 export interface WebFetchParse {

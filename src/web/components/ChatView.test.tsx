@@ -1333,6 +1333,56 @@ describe("ChatView activity presentation", () => {
     );
   });
 
+  it("keeps a failed call on the raw detail so the reason stays visible", async () => {
+    stubChat(
+      [
+        userMessage(),
+        assistantMessage("a1", [
+          // `write` is the worst case: the structured view only needs `args`, so
+          // it would show the new content and hide the error entirely.
+          toolPart(
+            "call-write",
+            "write",
+            { path: "src/new.ts", content: "first\nsecond" },
+            { result: "Error: EACCES: permission denied", isError: true },
+          ),
+          { type: "text", text: "middle" },
+          // `read` would dress the error message up as file content.
+          toolPart(
+            "call-read",
+            "read",
+            { path: "src/a.ts", offset: 100 },
+            { result: "Error: ENOENT: no such file", isError: true },
+          ),
+          { type: "text", text: "done" },
+        ]),
+      ],
+      false,
+    );
+
+    render(<ChatView pane={pane} />);
+    await screen.findByText("done");
+
+    await waitFor(() =>
+      expect(document.querySelectorAll(".tool-detail section")).toHaveLength(4),
+    );
+    for (const detail of document.querySelectorAll(".tool-detail")) {
+      expect(detail.querySelector(".code-view")).toBeNull();
+      expect(detail.querySelector(".test-fallback")).toBeNull();
+    }
+    const [writeDetail, readDetail] = Array.from(
+      document.querySelectorAll(".tool-detail"),
+    ) as [HTMLElement, HTMLElement];
+    expect(writeDetail.textContent).toContain("permission denied");
+    expect(readDetail.textContent).toContain("no such file");
+    // The error text is labeled as an error, not as a result.
+    expect(
+      Array.from(readDetail.querySelectorAll("section label")).map(
+        (element) => element.textContent,
+      ),
+    ).toEqual(["Arguments", "Error"]);
+  });
+
   it("keeps an unknown tool on the raw detail even when it carries a display", async () => {
     stubChat(
       [

@@ -38,7 +38,11 @@ const TOOL_VIEWS: Record<string, ComponentType<ToolViewProps>> = {
 export function toolViewFor(
   toolName: string,
 ): ComponentType<ToolViewProps> | undefined {
-  return TOOL_VIEWS[toolName];
+  // `Object.hasOwn`: a plain index would also return inherited members, so a
+  // tool literally named `constructor` / `__proto__` / `toString` (tool names
+  // are not validated anywhere) would hand React a non-component and make the
+  // whole ChatView fail to render instead of falling back.
+  return Object.hasOwn(TOOL_VIEWS, toolName) ? TOOL_VIEWS[toolName] : undefined;
 }
 
 export type { ToolDetailItem, ToolViewProps } from "./common";

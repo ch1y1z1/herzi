@@ -573,6 +573,14 @@ function imageSha256(part: object, data: string): string {
  * client is told (`truncated`) instead of silently receiving a short diff.
  */
 const CHAT_DIFF_MAX_LINES = 2_000;
+/**
+ * Character budget for one projected diff. The line budget alone does not bound
+ * the payload (2 000 lines of 200k characters would be ~400 MB), and `display`
+ * is a second downlink channel next to `result`, so the total is capped here.
+ */
+const CHAT_DIFF_MAX_CHARS = 200_000;
+/** Longest single diff line; a longer line is clipped and marks the diff truncated. */
+const CHAT_DIFF_MAX_LINE_CHARS = 2_000;
 
 /** Text parts of a tool result, in order, as the projection reads them. */
 function toolResultText(value: PiMessage["content"]): string {
@@ -660,7 +668,7 @@ export function parsePiDisplayDiff(
   const raw = diff.split("\n");
   if (raw.at(-1) === "") raw.pop();
 
-  const lines: ChatDiffLine[] = [];
+  const parsed: ChatDiffLine[] = [];
   for (const line of raw) {
     const marker = line[0];
     if (marker !== "+" && marker !== "-" && marker !== " ") return undefined;
@@ -668,24 +676,40 @@ export function parsePiDisplayDiff(
     // Folded context: only reached as the `...` placeholder; a real content
     // line `...` is preceded by its line number and never trims to just it.
     if (rest.trim() === "...") {
-      lines.push({ kind: "skip", text: "..." });
+      parsed.push({ kind: "skip", text: "..." });
       continue;
     }
     const match = /^ *(\d+)(?: (.*))?$/u.exec(rest);
     if (!match) return undefined;
-    lines.push({
+    parsed.push({
       kind: marker === "+" ? "add" : marker === "-" ? "remove" : "context",
       lineNumber: Number(match[1]),
       text: match[2] ?? "",
     });
   }
-  if (!lines.length) return undefined;
+  if (!parsed.length) return undefined;
 
-  const truncated = lines.length > CHAT_DIFF_MAX_LINES;
-  return {
-    lines: truncated ? lines.slice(0, CHAT_DIFF_MAX_LINES) : lines,
-    truncated,
-  };
+  // Everything below only shapes the payload: the whole diff had to match the
+  // format first, so a partly parsed diff can never reach the client.
+  const lines: ChatDiffLine[] = [];
+  let budget = CHAT_DIFF_MAX_CHARS;
+  let truncated = parsed.length > CHAT_DIFF_MAX_LINES;
+  for (const line of parsed) {
+    if (lines.length >= CHAT_DIFF_MAX_LINES) break;
+    const clipped = clipDisplayText(line.text, CHAT_DIFF_MAX_LINE_CHARS);
+    if (clipped.length > budget) {
+      truncated = true;
+      break;
+    }
+    budget -= clipped.length;
+    if (clipped !== line.text) truncated = true;
+    lines.push(clipped === line.text ? line : { ...line, text: clipped });
+  }
+  return { lines, truncated };
+}
+
+function clipDisplayText(value: string, max: number): string {
+  return value.length > max ? `${value.slice(0, max)}…` : value;
 }
 
 /**
@@ -765,7 +789,11 @@ function boundedString(value: unknown): string | undefined {
 
 function boundedStringArray(value: unknown): string[] | undefined {
   if (!Array.isArray(value) || value.length > DISPLAY_ARRAY_MAX) return undefined;
-  const strings = value.filter((entry): entry is string => typeof entry === "string");
+  // Each item is bounded too: an array of <= 64 huge strings would otherwise be
+  // the largest projection in the whole structure.
+  const strings = value
+    .map((entry) => boundedString(entry))
+    .filter((entry): entry is string => entry !== undefined);
   return strings.length ? strings : undefined;
 }
 
@@ -780,9 +808,12 @@ function boundedNumberArray(value: unknown): number[] | undefined {
 /**
  * `ask_user_question` result: the recorded answers and the cancelled flag.
  *
- * An answer entry whose shape is not recognised makes the whole list unusable
- * (a partially listed questionnaire would misrepresent what was answered), but
- * `cancelled` and `globalNote` are independent of it and are still projected.
+ * An answer entry that is not an object makes the whole list unusable (a
+ * partially listed questionnaire would misrepresent what was answered). An
+ * object entry that has none of the recognised fields is skipped instead: it
+ * carries no information to show, and dropping it cannot change an answer that
+ * was shown. `cancelled` and `globalNote` are independent of the list and are
+ * still projected when it is refused.
  */
 function projectQuestion(
   record: ChatJsonObject,

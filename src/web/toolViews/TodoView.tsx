@@ -17,9 +17,7 @@ export function TodoView({ item, fallback }: ToolViewProps) {
   const rows = changeRows(change);
   if (!change.action && !rows.length) return <>{fallback}</>;
 
-  const action = change.action
-    ? (TODO_ACTIONS[change.action] ?? change.action)
-    : undefined;
+  const action = todoActionWord(change.action);
 
   return (
     <div className="tool-view todo-view">
@@ -40,6 +38,19 @@ export function TodoView({ item, fallback }: ToolViewProps) {
       )}
     </div>
   );
+}
+
+/**
+ * Action word for the card header.
+ *
+ * The lookup is own-property only: `action` can come from `details.action`, and
+ * a value like `constructor` would otherwise return an inherited member (a
+ * function) that React refuses to render as a child. An unknown action is shown
+ * verbatim — the raw word is still a fact about the call.
+ */
+function todoActionWord(action: string | undefined): string | undefined {
+  if (!action) return undefined;
+  return Object.hasOwn(TODO_ACTIONS, action) ? TODO_ACTIONS[action] : action;
 }
 
 function changeRows(change: TodoChange): Array<{ key: string; value: string }> {

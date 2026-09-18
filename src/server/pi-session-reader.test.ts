@@ -1030,6 +1030,18 @@ describe("bridge projection parity", () => {
       text: "ok",
     },
     { toolName: "todo", details: {}, text: "ok" },
+    {
+      toolName: "edit",
+      details: {
+        diff: Array.from({ length: 20 }, (_value, index) => `+${index} ${"z".repeat(50_000)}`).join("\n"),
+      },
+      text: "replaced",
+    },
+    {
+      toolName: "ask_user_question",
+      details: { answers: [{ kind: "multi", selected: ["w".repeat(50_000)] }] },
+      text: "answered",
+    },
     { toolName: "web_search", details: { anything: true }, text: "results" },
   ];
 
@@ -1083,6 +1095,34 @@ describe("parsePiDisplayDiff", () => {
     expect(parsePiDisplayDiff("   ")).toBeUndefined();
     expect(parsePiDisplayDiff(42)).toBeUndefined();
   });
+
+  it("bounds the payload by lines, by line length and by total characters", () => {
+    // The line cap alone bounds nothing: a few lines of 200k characters would
+    // still be megabytes on the wire, and `display` is an extra downlink.
+    const longLine = "x".repeat(50_000);
+    const clipped = parsePiDisplayDiff(
+      Array.from({ length: 20 }, (_value, index) => `+${index} ${longLine}`).join("\n"),
+    );
+    expect(clipped?.truncated).toBe(true);
+    expect(clipped?.lines[0]?.text.endsWith("…")).toBe(true);
+    expect(clipped?.lines[0]?.text.length).toBeLessThan(2_100);
+
+    const manyLongLines = parsePiDisplayDiff(
+      Array.from({ length: 500 }, (_value, index) => `+${index} ${"y".repeat(2_000)}`).join("\n"),
+    );
+    const bytes = JSON.stringify(manyLongLines).length;
+    expect(bytes).toBeLessThan(250_000);
+    expect(manyLongLines?.truncated).toBe(true);
+
+    const manyLines = parsePiDisplayDiff(
+      Array.from({ length: 3_000 }, (_value, index) => `+${index} line`).join("\n"),
+    );
+    expect(manyLines?.lines).toHaveLength(2_000);
+    expect(manyLines?.truncated).toBe(true);
+
+    // A normal diff is not marked truncated.
+    expect(parsePiDisplayDiff("+1 a\n-2 b")?.truncated).toBe(false);
+  });
 });
 
 describe("parseReadRangeSummary", () => {
@@ -1115,6 +1155,19 @@ describe("projectToolDisplay", () => {
   it("refuses a partially reported diff instead of guessing", () => {
     expect(projectToolDisplay("edit", { diff: "@@ nope" }, "")).toBeUndefined();
     expect(projectToolDisplay("edit", { firstChangedLine: 3 }, "")).toBeUndefined();
+  });
+
+  it("bounds every string inside a projected array", () => {
+    const long = "y".repeat(50_000);
+    const display = projectToolDisplay(
+      "ask_user_question",
+      { answers: [{ kind: "multi", selected: Array.from({ length: 64 }, () => long) }] },
+      "answered",
+    );
+    const selected = display?.question?.answers[0]?.selected ?? [];
+    expect(selected).toHaveLength(64);
+    expect(selected.every((entry) => entry.length <= 1_001)).toBe(true);
+    expect(JSON.stringify(display).length).toBeLessThan(100_000);
   });
 
   it("still reads the range when the tool reported no details", () => {
