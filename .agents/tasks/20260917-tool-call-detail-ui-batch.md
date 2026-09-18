@@ -125,4 +125,4 @@
 - 真实浏览器视觉验收未做（diff 配色、行号对齐、长内容折叠、匹配列表分组）。
 - P3（宿主文件读取 / 「查看完整输出」）未实现，未开批次。
 - 资源待清理（需批准后进行）：worktree `agent-20260917-tool-call-detail-ui`（w19）、`review-20260917-tool-call-detail-ui`（w1A）、`review-20260917-tool-call-detail-ui-r2`（w1B）与 agent `herzi_toolviews` / `herzi_toolreview` / `herzi_toolrereview`，以及三个分支。
-- `main` 领先 `origin/main` 共 9 个 commit（5 个既有文档 + 本批），未推送。
+- `main` 领先 `origin/main` 共 **18 个** commit（方案/契约/实现/两轮 review 记录/集成记录），未推送（已用 `git rev-list --count origin/main..main` 核实）。
