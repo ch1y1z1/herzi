@@ -740,6 +740,16 @@ button {
   background: transparent;
 }
 
+/*
+ * Fenced code blocks render one block-level span per source line, so the shiki
+ * tokens of a line stay together and the block can be laid out row by row. The
+ * surrounding `pre` (dark background, horizontal scroll, padding) is unchanged:
+ * R7 only routes the block through the highlighting kernel.
+ */
+.code-block-line {
+  display: block;
+}
+
 /* Markdown 链接：MarkdownLink 负责行为，样式同时兼容 .markdown-body 下的任意
    anchor（兜底）与 .markdown-link 这个稳定钩子。Tailwind preflight 会把链接
    重置成继承色并去掉下划线，所以这里必须显式给出默认高亮。 */
@@ -913,6 +923,18 @@ button {
   color: #c2635d;
 }
 
+/*
+ * The body of a failed call.
+ *
+ * A view only describes successful calls (a failed `bash` result is an error
+ * message, not output), so the error text is what the generic Arguments/Error
+ * detail shows — and it was the same gray as everything else. R5 asks for errors
+ * in red, using the color the state icon already uses.
+ */
+.tool-error .tool-detail pre {
+  color: #c2635d;
+}
+
 .tool-chevron,
 .activity-chevron {
   flex: 0 0 auto;
@@ -964,9 +986,8 @@ button {
  *
  * The collapsed rows, the group headers and the `tool-detail` panel itself keep
  * their existing styling; only the content inside a view is styled here. Long
- * content is folded in the view (with an explicit line count) instead of being
- * put behind an inner scrollbar, hence the `max-height: none` override for
- * view `<pre>` elements.
+ * content is not folded and is not virtualized: every line stays in the DOM and
+ * the shared scroll window below bounds how much of it is visible.
  */
 .tool-view {
   display: grid;
@@ -977,6 +998,27 @@ button {
 .tool-view pre {
   max-height: none;
   overflow: visible;
+}
+
+/*
+ * The shared scroll window (Rev.2 R1/R2).
+ *
+ * `--tool-view-line-height` is the single line height of tool content: the cap
+ * below and the row heights inside are both derived from it, so a body taller
+ * than the window shows exactly 16 of those lines — not 15, not 17. The `16`
+ * matches `SCROLL_BOX_LINES` in `toolViews/ScrollBox.tsx`, which is what decides
+ * whether a view says 可滚动查看.
+ *
+ * No padding and no border: `box-sizing: border-box` is global, and either would
+ * eat into those 16 lines. `overflow-y: auto` keeps the platform scrollbar (it
+ * is deliberately not hidden or styled away); lines wrap, so no horizontal
+ * scrollbar can steal a line worth of height.
+ */
+.tool-view-scroll {
+  --tool-view-line-height: calc(10.5px * 1.55);
+  max-height: calc(16 * var(--tool-view-line-height));
+  overflow-x: hidden;
+  overflow-y: auto;
 }
 
 .tool-view-meta {
@@ -1016,7 +1058,7 @@ button {
   display: grid;
   font-family: "SFMono-Regular", Menlo, monospace;
   font-size: 10.5px;
-  line-height: 1.55;
+  line-height: var(--tool-view-line-height);
 }
 
 .diff-line,
@@ -1027,14 +1069,13 @@ button {
 }
 
 .code-line {
-  min-height: 1.55em;
+  min-height: var(--tool-view-line-height);
 }
 
 .diff-line-number,
 .code-line-number,
 .match-line-number {
-  flex: 0 0 auto;
-  min-width: 2.6em;
+  flex: 0 0 3.4em;
   color: #a2a79c;
   text-align: right;
   user-select: none;
@@ -1055,8 +1096,16 @@ button {
   word-break: break-word;
 }
 
+/*
+ * A changed row is marked twice, so the kind survives both a glance and a color
+ * vision difference: the whole row carries a band, and a 3px solid bar marks its
+ * left edge. The bar is an inset box-shadow rather than a border, because a
+ * border would shift the gutter column of that row by 3px relative to the
+ * context rows.
+ */
 .diff-line-add {
   background: #e8f0e2;
+  box-shadow: inset 3px 0 0 #6f9a55;
 }
 
 .diff-line-add .diff-line-marker,
@@ -1066,6 +1115,7 @@ button {
 
 .diff-line-remove {
   background: #f6e8e7;
+  box-shadow: inset 3px 0 0 #c2635d;
 }
 
 .diff-line-remove .diff-line-marker,
@@ -1092,6 +1142,20 @@ button {
   display: grid;
   gap: 5px;
   min-width: 0;
+}
+
+/* The `$` is a prompt, not part of the command: muted, and out of the selection
+   so copying the command by hand does not pick it up. */
+.output-prompt {
+  color: #a2a79c;
+  user-select: none;
+}
+
+/* Raw output is not source code and gets no syntax colors; an errored call is
+   red instead of the usual gray (R5). The selector has to outrank
+   `.tool-detail pre`, which sets the gray. */
+.output-body pre.output-error {
+  color: #c2635d;
 }
 
 .match-body {
@@ -1123,7 +1187,7 @@ button {
 .match-line-text {
   font-family: "SFMono-Regular", Menlo, monospace;
   font-size: 10.5px;
-  line-height: 1.55;
+  line-height: var(--tool-view-line-height);
 }
 
 .match-line-context .match-line-text {
@@ -1140,7 +1204,7 @@ button {
   color: #5e635a;
   font-family: "SFMono-Regular", Menlo, monospace;
   font-size: 10.5px;
-  line-height: 1.55;
+  line-height: var(--tool-view-line-height);
   word-break: break-all;
 }
 
