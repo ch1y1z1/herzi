@@ -135,6 +135,8 @@ Reviewer `herzi_rev2review` 完成，记录 commit `3189063`，结论：**需修
 
 四项必验：F1 是否真不以祖先为键（含可证伪实验）、F2 表述改动是否干净且 per-view 行数表准确、F4 是否真无第二层滚动容器（含可证伪实验）、F5 flake（独立连跑 `npm test` ≥15 次，复现则保留用例名）。已写入 Integrator 观察到但未定位的两次失败事实供其核对。
 
+**复审 agent 中断与恢复（2026-09-18/19）**：开发者报告「完成」后核实发现**复审并未完成** —— `herzi_rev2recheck` 启动约 4 秒后停住（pane 输出停在「即将读首轮记录与修复 diff」），**无 commit、无结论**，review 记录里只有契约本身。无任何错误输出。Integrator 重发 prompt（指向契约与四项必验）后 agent 恢复 `working`。当时误判为“完成”的原因与开发者看到的界面状态有关，已在汇报中澄清。
+
 ## 下一步（等开发者通知后由 Integrator 执行）
 
 1. 接收交付：范围检查（尤其确认未改 `src/server/**`、`src/shared/**`、依赖只多了 `shiki`）、worktree clean、记录与实际 diff 相符。
