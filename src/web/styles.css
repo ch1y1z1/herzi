@@ -936,8 +936,16 @@ button {
  * failed, so `.tool-error .tool-detail pre` also painted the successful siblings'
  * results red (review F1). The group's red state icon is separate and unchanged
  * (`.tool-error .tool-state` above).
+ *
+ * The `.tool-detail` in the selector is what makes the red win: it gives this
+ * rule (0,2,1) against the (0,1,1) of `.tool-detail pre` below, which otherwise
+ * wins on source order alone and renders the error text gray — the regression
+ * the second review found (N1). `GenericToolDetail` is only ever rendered inside
+ * `<div className="tool-detail">` (`ChatView.tsx`), so the ancestor is always
+ * there, and the specific selector stays free of any error state on an item's
+ * group.
  */
-.tool-result-error pre {
+.tool-detail .tool-result-error pre {
   color: #c2635d;
 }
 
@@ -1008,15 +1016,18 @@ button {
  * The shared scroll window (Rev.2 R1/R2).
  *
  * `--tool-view-line-height` is the single line height of tool content: the cap
- * below and the row heights inside are both derived from it, so a body taller
- * than the window shows exactly 16 of those lines — not 15, not 17. The `16`
- * matches `SCROLL_WINDOW_LINES` in `toolViews/ScrollBox.tsx`, which decides
- * whether a view says 可滚动查看.
+ * below and the row heights inside are both derived from it, so the window is
+ * 16 **code lines** tall — not 15, not 17 — and the content it shows depends on
+ * each view's own row heights (see §11.2 in the task notes: `edit` ~14–15,
+ * multi-file `ffgrep` ~9–10, Markdown ~12–13). The `16` matches
+ * `SCROLL_WINDOW_LINES` in `toolViews/ScrollBox.tsx`, which decides whether a
+ * view says 可滚动查看.
  *
  * No padding and no border: `box-sizing: border-box` is global, and either would
- * eat into those 16 lines. `overflow-y: auto` keeps the platform scrollbar (it
- * is deliberately not hidden or styled away); lines wrap, so no horizontal
- * scrollbar can steal a line worth of height.
+ * eat into that height. `overflow-y: auto` keeps the platform scrollbar (it is
+ * deliberately not hidden or styled away). Markdown code blocks keep their own
+ * horizontal scroll (`.markdown-body pre`), so no vertical scrollbar can steal a
+ * line worth of height.
  */
 .tool-view-scroll {
   --tool-view-line-height: calc(10.5px * 1.55);

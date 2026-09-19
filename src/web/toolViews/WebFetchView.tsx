@@ -6,11 +6,12 @@
  * and the Markdown body. The body is rendered as Markdown so that links keep the
  * chat's external-link behaviour.
  *
- * R6 of the Rev.2 spec: the body lives in the shared `ScrollBox` (16 lines
- * visible, native scroll) and the old "fold to 40 lines + 展开全部" button is
- * gone. Nothing beyond the received text is loadable here: fetching more of the
- * page is explicitly out of scope for this batch, so an over-long result is only
- * scrolled, never "expanded" by a second request.
+ * R6 of the Rev.2 spec: the body lives in the shared `ScrollBox` (a window 16
+ * code lines tall, native scroll) and the old "fold to 40 lines + 展开全部" button
+ * is gone. The Markdown inside keeps its own line spacing, so fewer than 16 of
+ * its lines are visible at once. Nothing beyond the received text is loadable
+ * here: fetching more of the page is explicitly out of scope for this batch, so
+ * an over-long result is only scrolled, never "expanded" by a second request.
  */
 
 import { webHost } from "../toolCatalog";
