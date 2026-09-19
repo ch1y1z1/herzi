@@ -196,6 +196,25 @@ Reviewer `herzi_rev2review` 完成，记录 commit `3189063`，结论：**需修
 
 只需验三件：N1 是否真的闭合（含可证伪实验与特异性/顺序的独立计算）、新断言（迷你级联解析器）本身是否可信（逗号列表/`>`/伪类/`!important`/`@layer`/非 color 属性等边界）、N2 注释是否改干净。
 
+## 集成（2026-09-19，第三轮复审结论「可合入」）
+
+- **merge Worker 分支**：`de71408`（`agent-20260918-tool-views-rev2`，含 3 功能 + 3 修复 commit），无冲突，23 文件 +2546 / −279。
+- **cherry-pick 三轮 review 文档**（6 个）：`987f4d5`、`4dedc25`（首轮契约 + 记录）、`7b81a8b`、`1e74d67`（定向复审契约 + 记录）、`68688eb`、`21e2d75`（最小复审契约 + 记录）。
+- **Integrator 文档更正**：`bd4042a` ——
+  - `plan §11`：R1 重写为「窗口高 16 个代码行」并附**各视图实际可见行数表**；补 R7/R8；新增「实现结果」「三轮 review 与修复」「已知限制」三节。
+  - **F6 更正**：首次高亮实际下载 **2 个主题**（github-light 11.18 kB + github-dark-default 14.43 kB），语言 chunk 实测 **15 个**而非 13。
+  - **F3/N5**：明确 `styles.test.ts` 为源码/规则层断言，证明不了渲染高度。
+  - **F7/N4**：高亮无大小上限、既有 `ChatAttachments` flaky 入已知限制。
+  - `docs/README.md`（索引状态 + 结论条目）与 `docs/development-log.md` 同步。
+- **集成态验证**：`npm ci` PASS；`npm run typecheck` PASS；`npm test` PASS（20 files / **309 tests**）；`npm run build` PASS；发行 CSS 核对 `.tool-detail .tool-result-error pre{color:#c2635d}` 存在且特异性高于 `.tool-detail pre`。
+- **未做**：真实浏览器与真实 Pane 验收仍是 `NOT RUN`；未 push。
+
+## 待批准
+
+- push 到 `origin/main`。
+- 资源清理：4 个 worktree / agent（`w1C` `herzi_viewrev2`、`w1D` `herzi_rev2review`、`w1E` `herzi_rev2recheck`、`w1F` `herzi_rev2final`）与对应分支。
+- 浏览器视觉验收：本批核心验收项（16 行观感、高亮配色、diff 背景带、红色是否只落在失败项、滚动条形态），需授权隔离端口/运行时。
+
 ## 下一步（等开发者通知后由 Integrator 执行）
 
 1. 接收交付：范围检查（尤其确认未改 `src/server/**`、`src/shared/**`、依赖只多了 `shiki`）、worktree clean、记录与实际 diff 相符。
