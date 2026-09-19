@@ -434,12 +434,36 @@ edit file.ts  +42 −7                      read file.ts · 第 100–199 行
 
 | 编号 | 决策 | 结果 |
 | --- | --- | --- |
-| R1 | 内容区高度 | **16 行**可视，超出靠滚动 |
+| R1 | 内容区高度 | **窗口高 16 个代码行**（`16 × --tool-view-line-height = 260.4px`），超出靠滚动。**不是「可见 16 行」**：各视图自身行高与间距不同，实际可见内容行数更少（见下） |
 | R2 | 虚拟滚动 | **不做**（学 Memoh：仅限高 + 原生滚动） |
 | R3 | 「展开全部 / 收起」 | **全部去掉**（含 Markdown 类） |
 | R4 | 代码高亮 | **shiki 按需加载**（新增 production dependency，开发者已批准） |
 | R5 | 视觉采纳 | diff 行背景带 + 左指示条；行号 gutter 列；命令 `$` 前缀 + 错误红色。**不含**字号/容器皮肤变更（保留现有字号与配色） |
 | R6 | Markdown 类（`web_fetch` / `web_search`） | 同一个 16 行窗口 + 原生滚动，去掉展开按钮 |
+| R7 | Chat 正文 fenced code block | **一并接入同一 shiki 内核**（开发者追加确认）；`ChatView.tsx` 本体未改，改动落在 `markdownPlugins.ts` 的 `components.SyntaxHighlighter` 钩子 |
+| R8 | 字号与容器皮肤 | **不改**（保留现有字号与配色；R5 只改那三项） |
+
+### 实现结果（2026-09-19，已集成）
+
+- 新增 `src/web/highlight.ts` + `highlightReact.tsx`：`shiki@4.4.3` + `createHighlighterCore` + JS 引擎（不引入 wasm 静态资源），内核/引擎/语言/主题全部按需 `import()`；语言由 `args.path` 扩展名或 fence info 推断，未知走纯文本；`(code, lang, theme)` LRU 64 + in-flight 去重；高亮未就绪、语言不支持、tokenize 抛错一律返回 `undefined` → 纯文本，行高不变、无跳动、不用 spinner。
+- 新增 `src/web/toolViews/ScrollBox.tsx`：所有内容型视图与**通用降级详情**（失败/未知/解析失败的 Arguments/Result）共用同一窗口；删除了全部「展开全部 / 收起」与 `expanded` 状态，行数文案为 `共 N 行 · 可滚动查看`。
+- 体积（同法 `rm -rf dist && npm run build`）：`index-*.js` **544.87 kB 不变**（首屏零 shiki 引用，已由复审核实）；`ChatView-*.js` 771.73 → 776.16 kB（gzip +1.8 kB）；CSS −85 B。按需 chunk：shiki 内核 93.56 kB、引擎 57.63 kB、语言 chunk **15 个**（13 个语言中 `css`、`javascript` 各多一个 re-export 壳）、主题 chunk **2 个**（`github-light` 11.18 kB + `github-dark-default` 14.43 kB，首次高亮会同时下载两个）。
+
+### 各视图实际可见行数（修正 R1 的表述）
+
+窗口高度固定为 16 个**代码行**；下列是各视图自身行高/间距下的实际可见**内容行数**（CSS 算术，未做真实渲染测量）：
+
+| 视图 | 可见内容行数 | 依据 |
+| --- | --- | --- |
+| `read` / `write`（`CodeView`） | **16** | `.code-line` 的 `min-height` 就是变量、行间无 gap → 唯一精确的情形 |
+| `bash`（`OutputView`） | **16**（长行折行时更少） | `<pre>` 走 `.tool-detail pre` 的 `line-height: 1.55`，数值上等于变量 |
+| `edit`（`DiffView`，含 skip 行） | 约 **14–15** | 每个 `⋯ 略过的上下文` 多约 6px（边框 + margin） |
+| `ffgrep`（多文件） | 约 **9–10** | 文件头行高 + `.match-body` gap 7px + `.match-file` gap 1px |
+| `fffind`（路径列表） | 约 **15** | 列表行高 = 变量 + `gap: 1px` |
+| `web_fetch` / `web_search`（Markdown） | 约 **12–13** | `.markdown-body` 字号 12px、行距继承 1.68 |
+| 通用 Arguments/Result 详情 | 各自约 **16** | `<pre>` 同上 |
+
+`.tool-detail pre { line-height: 1.55 }` 与 `--tool-view-line-height: calc(10.5px * 1.55)` 是两处独立字面量（数值恰好相等）。开发者本次裁决「不改布局 + 记录说明」，因此保持原样；将来若要统一，是一行改动且零视觉变化。
 
 ### 设计
 
@@ -449,6 +473,25 @@ edit file.ts  +42 −7                      read file.ts · 第 100–199 行
 - diff 行背景带 + 左指示条；`edit` 保留「首个改动在第 N 行」。
 - `bash`：命令显示为 `$ <command>`（`$` 用 muted 色），stderr 与错误用红色。
 - 变更前后均记录 `npm run build` 的体积差异（可核对）。
+
+### 三轮独立 review 与修复（2026-09-19 完成）
+
+| 轮次 | 结论 | 结果 |
+| --- | --- | --- |
+| 第一轮（8 条） | 需修复后合入 | 注入面**不存在**（未用 `dangerouslySetInnerHTML`）；shiki **真的按需**（首屏零引用）；删除彻底；`components.SyntaxHighlighter` 确是 assistant-ui 支持的钩子 |
+| 第二轮（定向，N1 blocking） | 需修复后合入 | **发现 F1 修复的回归**：红色规则 `.tool-result-error pre`（0,1,1）被 `.tool-detail pre`（0,1,1，靠后）覆盖 → “泄漏没了，红色也没了” |
+| 第三轮（最小定向） | **可合入** | N1 已闭合：`.tool-detail .tool-result-error pre`（0,2,1）靠特异性取胜；`styles.test.ts` 新增**能算级联胜者**的断言（`specificity` / `matchesPath` / `resolvedColor`），降低特异性即 FAIL（已实测）；N2 三处注释改干净 |
+
+集成态验证：`npm ci` / `npm run typecheck` / `npm test`（**20 files / 309 tests**）/ `npm run build` 全部 PASS；发行 CSS 核对 `.tool-detail .tool-result-error pre{color:#c2635d}` 存在且特异性高于 `.tool-detail pre`。
+
+### 已知限制
+
+| 项 | 说明 |
+| --- | --- |
+| 高亮无大小上限（F7，开发者决定记为已知项） | `codeToTokens` 在主线程同步执行；实测约 0.18ms/行（2000 行 ≈ 400ms、8000 行 ≈ 1.45s）；LRU 按 64 **条**而非字节。触发面是 Chat 正文或 `web_fetch` 正文里的超长 fenced code block |
+| 测试只能做源码层断言（F3/N5） | `styles.test.ts` 不执行真实级联与布局；N1 正是靠它放行的。现已补上迷你级联解析器，但仍**证明不了渲染高度与真实浏览器颜色** |
+| 既有 flaky（N4，与本批无关） | `ChatAttachments.test.tsx` 的 5s 超时在**极端并发负载**下失败（并行跑多个全量 `npm test` 时）；在 base 与交付分支上以同概率出现。属测试基础设施问题，建议单开一轮 |
+| 未做真实浏览器验收 | 16 行观感、高亮配色、diff 背景带、红色是否只落在失败项、滚动条形态，全部只有 DOM/CSS 源码层与算术证据 |
 
 ### 风险
 

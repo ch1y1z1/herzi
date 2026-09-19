@@ -690,3 +690,34 @@ F4、F6、F7、F8、F9（路由/dedupe 测试部分）、F10、F11 与 I1–I6 �
 
 - `display` 逐字段有上限，但整体无累计预算：`ask_user_question` 的 `answers` 嵌套相乘理论上界约 4.3 MB（真实数据 1–4 题，不可达）。
 - bridge 投影是手抄副本（扩展为独立安装包，无法 import 仓库代码），parity 测试只覆盖纯函数层。
+
+## 2026-09-19：工具调用展示 Rev.2（固定高度滚动 + shiki 高亮）
+
+来源：开发者反馈旧设计「非常不好，而且不美观」（默认折叠 200 行、点展开后一次性渲染几千行、代码无高亮）；设计见 `docs/tool-call-detail-ui-plan.md` §11。
+
+### 交付
+
+- **固定高度滚动窗口**（`src/web/toolViews/ScrollBox.tsx`）：六个内容视图与**通用降级详情**（失败/未知/解析失败）共用同一窗口，`max-height: calc(16 * var(--tool-view-line-height))`；删除全部「展开全部 / 收起」与 `expanded` 状态，行数文案改为 `共 N 行 · 可滚动查看`；**不做虚拟化**（DOM 仍持有全部行，与 Memoh 一致）。
+- **shiki 按需高亮**（新增 `src/web/highlight.ts` + `highlightReact.tsx`）：`shiki@4.4.3` + `createHighlighterCore` + JS 引擎（无 wasm），内核/引擎/语言/主题全部按需 `import()`；未知语言或加载失败一律降级为纯文本；LRU 64 + in-flight 去重。
+- **Chat 正文代码块**：`markdownPlugins.ts` 接入 `components.SyntaxHighlighter`，`ChatView.tsx` **未改**。
+- **Memoh 借鉴的三项视觉**：diff 行背景带 + 3px 左指示条、行号 gutter（右对齐、不可选中）、命令 `$` 前缀与错误红色。
+- 依赖：**只新增 `shiki`**；首屏 `index-*.js` 体积**零变化**，`ChatView-*.js` +154 B（gzip +1.8 kB）。
+
+### 三轮独立 review（重要教训）
+
+1. 第一轮 8 条 findings，结论「需修复后合入」；实测推翻了两个风险（无 `dangerouslySetInnerHTML` 注入面、shiki 真按需）。
+2. 第二轮抓到 **N1（blocking）—— F1 的修复引入回归**：把红色规则从 `.tool-error .tool-detail pre`（0,2,1）改为 `.tool-result-error pre`（0,1,1）后，与 `.tool-detail pre`（同为 0,1,1、源码在后）冲突 → 失败正文实际渲染为灰色，即「泄漏没了，红色也没了」。**测试没抓到**，因为 jsdom 不执行级联、`styles.test.ts` 当时只断言“源码里有这条规则”。
+3. 第三轮最小定向复审：**可合入** —— 修为 `.tool-detail .tool-result-error pre`（0,2,1）；并为 `styles.test.ts` 新增一个**迷你 CSS 级联解析器**（按“特异性优先、顺序次之”选胜者），把规则降回原位时会 FAIL（已实测）。
+
+### 验证（main 集成态）
+
+- `npm ci` PASS；`npm run typecheck` PASS；`npm test` PASS（20 files / **309 tests**）；`npm run build` PASS。
+- 发行 CSS 核对：`.tool-detail .tool-result-error pre{color:#c2635d}` 存在，特异性高于 `.tool-detail pre`。
+- 真实浏览器与真实 Pane 验收 **NOT RUN**（未授权）。
+- 既有 flaky：`ChatAttachments.test.tsx` 的 5s 超时在极端并发下失败，**base 与交付分支同概率**，与本批无关（记为已知项）。
+
+### 已知限制
+
+- 高亮无大小上限（开发者决定记为已知项）：`codeToTokens` 主线程同步执行，实测约 0.18ms/行（2000 行 ≈ 400ms、8000 行 ≈ 1.45s）。
+- 《窗口高 16 行》不等于「可见 16 行」：`ffgrep` 多文件约 9–10 行、`edit` 约 14–15 行、Markdown 约 12–13 行（详见方案 §11）。
+- `styles.test.ts` 仍是源码/规则层断言，**证明不了渲染高度与真实浏览器颜色**。
