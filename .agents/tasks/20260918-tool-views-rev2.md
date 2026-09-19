@@ -313,3 +313,95 @@ build 体积（第二轮交付 vs 第一轮交付 `91519de`，同法 `rm -rf dis
 - 本轮改动：`src/web/components/ChatView.tsx`（仅 `GenericToolDetail` / `ToolData` / `ToolResultData` 三处，F1+F4 裁决要求的通用详情渲染）、`src/web/components/ChatView.test.tsx`、`src/web/styles.css`、`src/web/toolViews/ScrollBox.tsx`（注释与常量改名）、`src/web/toolViews/common.tsx`（注释）、`src/web/styles.test.ts`、本文件。
 - 其余一切未动：无新增依赖、无 `src/server/**`、`src/shared/**`、`integrations/**`、`docs/**` 改动，未运行 `npm run dev`，未做任何 Git 破坏性操作。
 - `ChatView.tsx` 的折叠行、分组规则、`Worked for`、投递状态、todo 条逻辑仍然一行未改（改动只在通用工具详情的渲染分支内）。
+
+## 12. 第二轮定向复审后的修复（2026-09-18，第三轮）
+
+复审记录：`review-20260918-tool-views-rev2-r2:.agents/tasks/20260918-tool-views-rev2-review-r2.md`（结论「需修复后合入」，唯一阻塞项 N1）。开发者裁决：修 N1、把 N5 的断言升级为能锁级联的形式、改 N2 的 3 处注释；N3/N4/N6 不动。
+
+### 12.1 N1：红色被 `.tool-detail pre` 覆盖（回归，已修）
+
+**根因**：我上一轮把规则写成 `.tool-result-error pre`，特异性 (0,1,1)，与 `.tool-detail pre` 的 (0,1,1) **相同**，而灰色规则在文件里更靠后 → 后出现者胜 → 失败正文实际是灰色。修复前 `.tool-error .tool-detail pre` 是 (0,2,1)，红色确实生效（代价是泄漏）——所以这是「泄漏没了，红色也没了」。**这是我上一轮的实现错误，不是裁决错误。**
+
+**选的方案 (b)：把选择器改成 `.tool-detail .tool-result-error pre`（特异性 0,2,1）。**
+
+理由（三案比较）：
+
+| 方案 | 为什么没选 |
+| --- | --- |
+| (a) 把红色规则移到 `.tool-detail pre` 之后 | 能修好，但胜出**依赖源码顺序**——正是这次出问题的机制。将来任何重排/格式化/新增规则都可能让它静默复发，而且红色规则会离开它旁边的 `.tool-error .tool-state` 错误色块，语义上被拆散 |
+| (c) 在 `.tool-result-error` 段上设 `color` 让 `<pre>` 继承 | 不可行：`.tool-detail pre` 显式设了 `color: #5e635a`，显式值不吃继承；要让它生效就得把 `.tool-detail pre` 改成 `color: inherit`，那会连带改变 Arguments 段、各视图与 Markdown 代码块的灰色来源 → 属于改配色（R8 不允许），且需要再确认没有其它显式覆盖 |
+| **(b) 提高特异性** | 用**特异性**而不是顺序保证胜出：`.tool-detail` 是所有通用详情的必然祖先（`ChatView.tsx` 的 `ToolFallback` 与 `ToolItemRow` 都用 `<div className="tool-detail">` 包住 `ToolDetail`，全仓只有这两处调用），所以不会失去匹配；选择器里仍然只有「失败结果 section」这一个错误状态，不含任何分组级的 error 祖先，因此不会重新泄漏 |
+
+**证据（可证伪，已实测）**
+
+1. 实验 1：把选择器降回 `.tool-result-error pre`（同特异性、位置仍在灰色规则之前）→ `npx vitest run src/web/styles.test.ts` **FAIL**：`expected '#5e635a' to be '#c2635d'`（新断言直接把 N1 的后果抓出来）。还原后 md5 `a6efdf4c4fe592e85d43c65b635325ce` 一致。
+2. 实验 2：改回祖先键控的旧写法 `.tool-error .tool-detail pre` → **FAIL 4 条**，其中 `leaves a successful sibling in a failed group gray` → `expected '#c2635d' to be '#5e635a'`、`leaves the Arguments section gray` 同（F1 泄漏形态被抓住）。已还原。
+3. 发行 CSS 静态证据（`grep -o` + 按 CSS 规范（特异性、然后顺序）解析，脚本 `/tmp/rev2-n1-static.mjs`）：
+
+   缺陷态（临时回退后构建，`index-DiLH9O1W.css`，与上一轮交付的 CSS 哈希一致）：
+   ```
+   offset  20348  spec (0,1,1)  .tool-detail pre{color:#5e635a;…}
+   generic failed result <pre> — competing rules: 1
+   WINNER: .tool-detail pre -> #5e635a        ← 灰色，N1 复现
+   ```
+   修复态（当前 `dist/web/assets/index-WzzfKINp.css`）：
+   ```
+   offset  19782  spec (0,2,1)  .tool-detail .tool-result-error pre{color:#c2635d}
+   offset  20361  spec (0,1,1)  .tool-detail pre{color:#5e635a;…}
+   offset  22239  spec (0,2,1)  .output-body pre.output-error{color:#c2635d}
+   generic failed result <pre> — competing rules: 2
+   WINNER: .tool-detail .tool-result-error pre -> #c2635d     ← 红色，且红色规则仍然在灰色规则之前
+   ```
+   （`.output-body pre.output-error` 需要 `.output-body` 祖先，通用结果 `<pre>` 没有，故不参与竞争；它是 `bash` 视图路径的红色，另有一条用例覆盖。）
+4. DOM 层不变：`tool-result-error` 仍然只加在 `isError` 的 Result section 上（上一轮新增的 ChatView 用例照旧通过）。
+
+### 12.2 N5：测试从「规则存在」升级为「谁在级联中胜出」（已改）
+
+`styles.test.ts` 现在自带一个**小型级联解析器**（不新增依赖，约 150 行测试代码）：把真实 `styles.css` 解析成有序规则 → 按宿主元素/`.class` 子集匹配一条「祖先→目标」链（支持后代与 `>` 组合符）→ 按 **特异性优先、源码顺序次之** 选胜者 → 返回胜者声明的 `color`。配套改动：
+
+- `cssRule()` / `hasRule()` / `anySelectorIncludes()` 改为按**规范化后的完整选择器列表**比较（`a,\nb` 与 `a, b` 等价），行为不变。
+- 新增 4 条**按结果断言**的用例（不是断言规则文本）：
+  | 路径（`ChatView.tsx` 真实渲染的 class 链） | 期望胜出色 |
+  | --- | --- |
+  | 失败调用的 Result `<pre>`（行自带 `tool-error`） | `#c2635d` |
+  | 失败调用的 `bash` 视图输出 `<pre class="output-text output-error">` | `#c2635d` |
+  | **同一失败分组内成功兄弟**的 Result `<pre>`（分组带 `tool-error`、子行不带） | `#5e635a` |
+  | 失败调用的 Arguments `<pre>` | `#5e635a` |
+- 另加一条 **guard 用例**：枚举「目标元素是 `<pre>`」的全部规则，断言集合恰为 `{.markdown-body pre, .tool-detail .tool-result-error pre, .tool-detail pre, .output-body pre.output-error}`，并断言每条选择器的每个复合选择器都落在解析器建模的子集（元素名/类）内。这样将来新增任何能给 `<pre>` 上色的规则都会在这里变成 diff，解析器不会「看不见」它。
+- 另加一条**机制断言**：`.tool-detail pre` 是 (0,1,1)、`.tool-detail .tool-result-error pre` 是 (0,2,1) 且后者严格更高——即红色不依赖源码顺序取胜。
+- 可证伪性：§12.1 的实验 1/2 就是在这套断言上失败的（实验 1 有 3 条 FAIL，含决定性的 `resolvedColor` 断言）；上一轮那套「只断言规则存在」的写法在缺陷态是全绿的，这正是 N1 逃逸的原因。
+
+### 12.3 N2：3 处注释的表述（已改）
+
+| 位置 | 改法 |
+| --- | --- |
+| `src/web/styles.css`（`.tool-view-scroll` 上方） | 「a body taller than the window shows exactly 16 of those lines」→「the window is 16 **code lines** tall — not 15, not 17 — and the content it shows depends on each view's own row heights（含 `edit` ~14–15 / `ffgrep` ~9–10 / Markdown ~12–13 的指引）」；顺带把「lines wrap, so no horizontal scrollbar…」改成如实说明 Markdown 代码块保留自己的横向滚动（N3 的边界，非阻塞） |
+| `src/web/styles.test.ts` | 「of the 16 visible lines」→「of the window's 16 code lines」 |
+| `src/web/toolViews/WebFetchView.tsx` | 「the shared `ScrollBox` (16 lines visible, native scroll)」→「a window 16 code lines tall, native scroll」+ 明确 Markdown 自身行距导致可见行数少于 16 |
+
+`docs/tool-call-detail-ui-plan.md` 的两处（:437、:446）按裁决留给 Integrator，本轮未改。
+
+### 12.4 本轮明确没动的（按裁决）
+
+- **N3**（`.markdown-body pre` 的横向滚动）：有意保留，只在注释里写明。
+- **N4**（`ChatAttachments` 5s 超时）：既有、base 同样复现，不在本批范围。
+- **N6**（`lineCountNote` 阈值保守）：已知取舍，注释与 §11.2 已记录。
+
+### 12.5 验证（第三轮，全部实测）
+
+| 命令 | 结果 |
+| --- | --- |
+| `npx vitest run src/web/toolViews src/web/components/ChatView.test.tsx` | **PASS** — 4 files / 142 tests |
+| `npm run typecheck` | **PASS**（无输出） |
+| `npm test` | **PASS** — 20 files / **309 tests**（较上轮 +6：级联解析器的 5 条 + 机制断言 1 条）；连跑 3 次全 PASS |
+| `npm run build` | **PASS**（`rm -rf dist` 后构建；typecheck + server + web 全过） |
+| N1 可证伪实验 ×2 | 均 **FAIL（预期）**，随后还原并校验 md5 一致（见 §12.1） |
+| 发行 CSS 静态解析（缺陷态/修复态） | **PASS**（缺陷态 WINNER=灰；修复态 WINNER=红，见 §12.1 第 3 条） |
+
+体积（第三轮 vs 第二轮交付 `bf6c04c`）：`index-*.js` 544877 B → 544877 B（不变）；`ChatView-*.js` 776159 B → 776159 B（不变）；`index-*.css` 66232 B → **66245 B（+13 B）**——只来自选择器多出的 `.tool-detail `（注释不进产物）。无新增依赖。
+
+### 12.6 未验证与限制（本轮）
+
+- **仍未做真实浏览器与真实 Pane 验收**（未授权）。N1 的修复结论由三部分支撑：① 按 CSS 规范的级联解析（自建解析器 + `/tmp` 脚本两处独立实现，结论一致）；② 发行 CSS 的规则文本、偏移与特异性；③ jsdom DOM 层断言（错误类只落在失败项）。**这三者都不是真实浏览器的计算样式测量**，仍属静态推断；审查已实测确认 jsdom 忽略特异性，因此 jsdom 只能作旁证。
+- 自建解析器只建模元素名/类与后代/`>` 组合符（guard 用例保证 `<pre>` 相关规则不越界）；`@media` 条件被忽略（当前唯一的 `@media` 块只改布局、不含 `<pre>` 颜色，已人工核对）。
+- 其它限制同 §11.5（F7 的同步 tokenize 上限、尾部跟随的观察器环节、jsdom 不做布局）。
