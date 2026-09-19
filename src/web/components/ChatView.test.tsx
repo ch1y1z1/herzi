@@ -91,10 +91,16 @@ function jsonResponse(body: unknown, status = 200): Response {
 
 type ApiFetchCall = Parameters<typeof apiFetch>;
 
+/**
+ * Calls to the prompt endpoint itself.
+ *
+ * Matched on the end of the path: a substring check for `/prompt` also caught
+ * `/api/prompt-delivery/events`, so when the 300ms client-trace flush landed
+ * inside a test's wait window, the trace upload counted as a second prompt call
+ * and "No automatic retry" failed (review F5, a pre-existing flake).
+ */
 function promptCalls(): ApiFetchCall[] {
-  return mockedApiFetch.mock.calls.filter(([url]) =>
-    String(url).includes("/prompt"),
-  );
+  return mockedApiFetch.mock.calls.filter(([url]) => /\/prompt(?:[?#]|$)/u.test(String(url)));
 }
 
 function requestIdOf(call: ApiFetchCall): string {
@@ -991,6 +997,56 @@ describe("ChatView turn order", () => {
   });
 });
 
+describe("ChatView code blocks", () => {
+  /**
+   * R7: a fenced code block goes through the same shiki kernel as the tool
+   * views, while inline code keeps the plain rendering it always had.
+   */
+  it("highlights a fenced block and leaves inline code alone", async () => {
+    const message = [
+      "看这段代码：",
+      "",
+      "```ts",
+      "const answer = 42;",
+      "```",
+      "",
+      "以及 `inline` 代码。",
+    ].join("\n");
+    stubChat(
+      [userMessage(), assistantMessage("a1", [{ type: "text", text: message }])],
+      false,
+    );
+
+    render(<ChatView pane={pane} />);
+    await screen.findByText("看这段代码：");
+
+    const lines = await waitFor(() => {
+      const found = document.querySelectorAll(
+        ".markdown-body pre code .code-block-line",
+      );
+      expect(found).toHaveLength(1);
+      return found;
+    });
+    // The block's text is exactly the code that was in the fence.
+    expect(lines[0]?.textContent).toBe("const answer = 42;");
+
+    // …and the colors arrive from the kernel without changing that text.
+    await waitFor(() =>
+      expect(
+        document.querySelector('.markdown-body pre code .code-block-line span[style*="color"]'),
+      ).toBeTruthy(),
+    );
+    expect(lines[0]?.textContent).toBe("const answer = 42;");
+
+    // Inline code is untouched: plain text, no block rows, no token spans.
+    const inline = Array.from(
+      document.querySelectorAll(".markdown-body code"),
+    ).find((element) => element.textContent === "inline");
+    expect(inline).toBeTruthy();
+    expect(inline?.querySelector(".code-block-line")).toBeNull();
+  });
+});
+
 describe("ChatView activity presentation", () => {
   beforeEach(() => {
     resetPanelOpenStores();
@@ -1262,7 +1318,7 @@ describe("ChatView activity presentation", () => {
     expect(detail.textContent).toContain("已显示 100–101 / 共 9 行");
   });
 
-  it("shows the tail of a bash result and never claims an exit code", async () => {
+  it("keeps the whole bash output in the scrolling window and never claims an exit code", async () => {
     const output = Array.from(
       { length: 25 },
       (_value, index) => `line ${index + 1}`,
@@ -1283,10 +1339,14 @@ describe("ChatView activity presentation", () => {
 
     await waitFor(() => expect(document.querySelector(".output-view")).toBeTruthy());
     const detail = document.querySelector(".tool-detail") as HTMLElement;
-    expect(detail.querySelector(".output-command pre")?.textContent).toBe("npm test");
+    // R5: the command is prefixed with the `$` prompt marker.
+    expect(detail.querySelector(".output-command pre")?.textContent).toBe("$ npm test");
+    // R1/R2: every line is in the DOM; the window, not a fold, bounds the view.
     const shown = detail.querySelector(".output-body pre")?.textContent ?? "";
+    expect(shown).toContain("line 1");
     expect(shown).toContain("line 25");
-    expect(shown).not.toContain("line 1\n");
+    expect(detail.querySelector(".tool-view-scroll")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /展开全部|收起/u })).toBeNull();
     // The result text has no exit status, so the view must not show one.
     expect(detail.textContent).not.toMatch(/退出码|exit code/iu);
   });
@@ -1381,6 +1441,81 @@ describe("ChatView activity presentation", () => {
         (element) => element.textContent,
       ),
     ).toEqual(["Arguments", "Error"]);
+  });
+
+  it("bounds the generic Arguments/Result detail with the shared window (F4)", async () => {
+    stubChat(
+      [
+        userMessage(),
+        assistantMessage("a1", [
+          toolPart(
+            "call-bash",
+            "bash",
+            { command: "npm test" },
+            { result: "boom", isError: true },
+          ),
+          { type: "text", text: "done" },
+        ]),
+      ],
+      false,
+    );
+
+    render(<ChatView pane={pane} />);
+    await screen.findByText("done");
+
+    // Arguments and Error, each in a window — the same component the views use,
+    // on a path that has no `.tool-view` ancestor.
+    await waitFor(() =>
+      expect(document.querySelectorAll(".tool-detail .tool-view-scroll")).toHaveLength(2),
+    );
+    const detail = document.querySelector(".tool-detail") as HTMLElement;
+    expect(
+      Array.from(detail.querySelectorAll("section")).map(
+        (section) => section.className,
+      ),
+    ).toEqual(["tool-data", "tool-result tool-result-error"]);
+    // No `<pre>` in the panel scrolls on its own any more.
+    for (const pre of detail.querySelectorAll("pre")) {
+      expect(pre.parentElement?.className).toContain("tool-view-scroll");
+    }
+    expect(detail.textContent).toContain("boom");
+  });
+
+  it("marks only the failed call's own result when one call in a group failed (F1)", async () => {
+    stubChat(
+      [
+        userMessage(),
+        assistantMessage("a1", [
+          toolPart(
+            "call-fail",
+            "bash",
+            { command: "npm test" },
+            { result: "boom", isError: true },
+          ),
+          toolPart("call-ok", "mystery_tool", { query: "x" }, { result: "fine" }),
+          { type: "text", text: "done" },
+        ]),
+      ],
+      false,
+    );
+
+    render(<ChatView pane={pane} />);
+    await screen.findByText("done");
+
+    await waitFor(() =>
+      expect(document.querySelector(".activity-tool-group")).toBeTruthy(),
+    );
+    const group = document.querySelector(".activity-tool-group") as HTMLElement;
+    // The group represents the failure — its own state icon is red…
+    expect(group.className).toContain("tool-error");
+    const items = Array.from(group.querySelectorAll(".tool-item")) as HTMLElement[];
+    expect(items).toHaveLength(2);
+    // …but the error class must reach only the failed call's result section,
+    // never a successful sibling's (review F1).
+    const failed = items.find((item) => item.textContent?.includes("boom"));
+    const succeeded = items.find((item) => item.textContent?.includes("fine"));
+    expect(failed?.querySelectorAll(".tool-result-error")).toHaveLength(1);
+    expect(succeeded?.querySelector(".tool-result-error")).toBeNull();
   });
 
   it("keeps an unknown tool on the raw detail even when it carries a display", async () => {

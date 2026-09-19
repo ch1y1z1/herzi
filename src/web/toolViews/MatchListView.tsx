@@ -25,7 +25,12 @@ import {
   ViewNote,
   type ToolViewProps,
 } from "./common";
+import { ScrollBox } from "./ScrollBox";
 
+/**
+ * Both bodies live in the shared scroll window (R1/R2/R6): all matches and all
+ * paths stay in the DOM and are only limited visually.
+ */
 export function MatchListView({ item, fallback }: ToolViewProps) {
   const text = toolResultText(item.result);
   if (text === undefined) return <>{fallback}</>;
@@ -58,22 +63,24 @@ function GrepMatchView({
         {display?.matchCount?.hasMore && <ViewNote>还有更多结果未显示</ViewNote>}
         <CopyButton text={text} label="复制匹配" />
       </ViewMeta>
-      <div className="match-body">
-        {parsed.files.map((file, index) => (
-          <div className="match-file" key={index}>
-            {file.path && <div className="match-file-path">{file.path}</div>}
-            {file.matches.map((match, matchIndex) => (
-              <div
-                className={`match-line ${match.isMatch ? "match-line-hit" : "match-line-context"}`}
-                key={matchIndex}
-              >
-                <span className="match-line-number">{match.line}</span>
-                <span className="match-line-text">{match.text}</span>
-              </div>
-            ))}
-          </div>
-        ))}
-      </div>
+      <ScrollBox>
+        <div className="match-body">
+          {parsed.files.map((file, index) => (
+            <div className="match-file" key={index}>
+              {file.path && <div className="match-file-path">{file.path}</div>}
+              {file.matches.map((match, matchIndex) => (
+                <div
+                  className={`match-line ${match.isMatch ? "match-line-hit" : "match-line-context"}`}
+                  key={matchIndex}
+                >
+                  <span className="match-line-number">{match.line}</span>
+                  <span className="match-line-text">{match.text}</span>
+                </div>
+              ))}
+            </div>
+          ))}
+        </div>
+      </ScrollBox>
       {parsed.notes.map((note, index) => (
         <ViewNote key={index}>{note}</ViewNote>
       ))}
@@ -106,13 +113,15 @@ function FilePathView({
         {display?.matchCount?.hasMore && <ViewNote>还有更多结果未显示</ViewNote>}
         <CopyButton text={parsed.paths.join("\n")} label="复制路径" />
       </ViewMeta>
-      <div className="path-list">
-        {parsed.paths.map((path, index) => (
-          <div className="path-line" key={index}>
-            {path}
-          </div>
-        ))}
-      </div>
+      <ScrollBox>
+        <div className="path-list">
+          {parsed.paths.map((path, index) => (
+            <div className="path-line" key={index}>
+              {path}
+            </div>
+          ))}
+        </div>
+      </ScrollBox>
       {parsed.notes.map((note, index) => (
         <ViewNote key={index}>{note}</ViewNote>
       ))}

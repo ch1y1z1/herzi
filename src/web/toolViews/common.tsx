@@ -13,7 +13,9 @@ import { MarkdownTextPrimitive } from "@assistant-ui/react-markdown";
 import { useState, type ReactNode } from "react";
 
 import type { ChatJsonObject, ChatToolDisplay } from "../../shared/protocol";
+import { TEXT_LANGUAGE, languageForPath } from "../highlight";
 import { markdownShared } from "../markdownPlugins";
+import { SCROLL_WINDOW_LINES } from "./ScrollBox";
 
 /**
  * One tool call as the detail views see it. Structurally compatible with the
@@ -82,23 +84,35 @@ export function CopyButton({ text, label = "复制" }: { text: string; label?: s
   );
 }
 
-/** Toggle for content that is folded by default. */
-export function ExpandButton({
-  hidden,
-  expanded,
-  onToggle,
-}: {
-  hidden: number;
-  expanded: boolean;
-  onToggle: (expanded: boolean) => void;
-}) {
-  return (
-    <button
-      type="button"
-      className="tool-view-action tool-view-expand"
-      onClick={() => onToggle(!expanded)}
-    >
-      {expanded ? "收起" : `还有 ${hidden} 行未显示 · 展开全部`}
-    </button>
-  );
+// There is intentionally no expand/collapse control here any more: R3 of the
+// Rev.2 spec removed all of them, and long content now scrolls in the shared
+// window (`ScrollBox`) instead of being folded and unfolded in place.
+
+/**
+ * Language of the file this call touched, from `args.path`.
+ *
+ * A call without a usable path (or with an extension outside the supported set)
+ * is `text`: the view shows plain code rather than guessing a grammar.
+ */
+export function languageForItem(item: ToolDetailItem): string {
+  const path = item.args.path;
+  return typeof path === "string" ? languageForPath(path) : TEXT_LANGUAGE;
+}
+
+/**
+ * `共 N 行`, with a scroll hint once N no longer fits the window.
+ *
+ * Replaces the old `还有 N 行未显示 · 展开全部`: the line count is still real
+ * (it is the number of lines actually in the DOM), but nothing is hidden behind
+ * a button — the window scrolls.
+ *
+ * The threshold compares the line count with the window height in code lines. A
+ * body with few but tall rows (a multi-file `ffgrep` spends height on file
+ * headers and gaps) can therefore scroll without the hint: it understates, it
+ * never claims scrolling for content that fits.
+ */
+export function lineCountNote(lineCount: number): string {
+  return lineCount > SCROLL_WINDOW_LINES
+    ? `共 ${lineCount} 行 · 可滚动查看`
+    : `共 ${lineCount} 行`;
 }

@@ -10,7 +10,6 @@ import {
   readStartLine,
   resultLines,
   splitReadResult,
-  tailLines,
   todoChange,
   todoStatusLabel,
   toolResultText,
@@ -50,17 +49,11 @@ describe("toolResultText", () => {
   });
 });
 
-describe("resultLines / tailLines", () => {
+describe("resultLines", () => {
   it("drops only the final-newline artifact", () => {
     expect(resultLines("a\nb\n")).toEqual(["a", "b"]);
     expect(resultLines("a\n\nb")).toEqual(["a", "", "b"]);
     expect(resultLines("")).toEqual([""]);
-  });
-
-  it("keeps the tail and reports how many lines were dropped", () => {
-    expect(tailLines("a\nb\nc", 2)).toEqual({ lines: ["b", "c"], hidden: 1 });
-    expect(tailLines("a\nb", 5)).toEqual({ lines: ["a", "b"], hidden: 0 });
-    expect(tailLines("", 5)).toEqual({ lines: [""], hidden: 0 });
   });
 });
 

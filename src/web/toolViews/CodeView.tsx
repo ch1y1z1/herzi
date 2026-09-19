@@ -1,18 +1,29 @@
 /**
- * `read` / `write` — code view with generated line numbers.
+ * `read` / `write` — code view with generated line numbers and syntax colors.
  *
  * The result text of a `read` carries no line-number prefixes (measured hit
  * rate 1%), so the numbers are generated from `args.offset` — the line the call
  * asked for — with the server's `readRange` as the fallback source. When the
  * start line cannot be established, no numbers are shown at all.
  *
- * `write` has no diff to show (`details` is an empty object in real sessions),
- * so it shows the new content from `args.content` and never pretends to be a
- * diff.
+ * Every line is rendered: the shared `ScrollBox` limits how much is *visible*,
+ * it does not remove anything from the DOM. Syntax colors come from the same
+ * shiki kernel as the chat body (highlight.ts) and fall back to plain text
+ * whenever the language or the highlighter is not available — the rows and their
+ * heights are identical in both cases, so nothing moves when the colors arrive.
  */
 
-import { useState } from "react";
-
+import { HighlightedText, useHighlightedLines } from "../highlightReact";
+import { ScrollBox } from "./ScrollBox";
+import {
+  CopyButton,
+  ViewMeta,
+  ViewNote,
+  languageForItem,
+  lineCountNote,
+  type ToolDetailItem,
+  type ToolViewProps,
+} from "./common";
 import {
   readStartLine,
   resultLines,
@@ -20,16 +31,6 @@ import {
   toolResultText,
   truncationSummary,
 } from "./toolText";
-import {
-  CopyButton,
-  ViewMeta,
-  ViewNote,
-  type ToolDetailItem,
-  type ToolViewProps,
-} from "./common";
-
-/** Lines shown before the rest is folded behind an explicit count. */
-const CODE_FOLD_LINES = 200;
 
 interface CodeSource {
   text: string;
@@ -40,15 +41,11 @@ interface CodeSource {
 }
 
 export function CodeView({ item, fallback }: ToolViewProps) {
-  const [expanded, setExpanded] = useState(false);
   const source = codeSource(item);
-  if (!source) return <>{fallback}</>;
+  const lines = source ? resultLines(source.text) : [];
+  const highlighted = useHighlightedLines(lines, languageForItem(item), "light");
+  if (!source || !lines.length) return <>{fallback}</>;
 
-  const lines = resultLines(source.text);
-  if (!lines.length) return <>{fallback}</>;
-
-  const shown = expanded ? lines : lines.slice(0, CODE_FOLD_LINES);
-  const hidden = lines.length - shown.length;
   const range = item.display?.readRange;
   const truncation = truncationSummary(item.display?.truncation);
 
@@ -57,39 +54,24 @@ export function CodeView({ item, fallback }: ToolViewProps) {
       <ViewMeta>
         <ViewNote>
           {item.toolName === "write" ? "新建内容" : "读取内容"}
-          {" · "}
-          {lines.length} 行
+          {` · ${lineCountNote(lines.length)}`}
         </ViewNote>
         <CopyButton text={source.text} label="复制内容" />
       </ViewMeta>
-      <div className="code-body">
-        {shown.map((line, index) => (
-          <div className="code-line" key={index}>
-            {source.start !== undefined && (
-              <span className="code-line-number">{source.start + index}</span>
-            )}
-            <span className="code-line-text">{line}</span>
-          </div>
-        ))}
-      </div>
-      {hidden > 0 && (
-        <button
-          type="button"
-          className="tool-view-action"
-          onClick={() => setExpanded(true)}
-        >
-          还有 {hidden} 行未显示 · 展开全部
-        </button>
-      )}
-      {expanded && lines.length > CODE_FOLD_LINES && (
-        <button
-          type="button"
-          className="tool-view-action"
-          onClick={() => setExpanded(false)}
-        >
-          收起
-        </button>
-      )}
+      <ScrollBox>
+        <div className="code-body">
+          {lines.map((line, index) => (
+            <div className="code-line" key={index}>
+              {source.start !== undefined && (
+                <span className="code-line-number">{source.start + index}</span>
+              )}
+              <span className="code-line-text">
+                <HighlightedText text={line} line={highlighted?.[index]} />
+              </span>
+            </div>
+          ))}
+        </div>
+      </ScrollBox>
       {range ? (
         <ViewNote>
           {`已显示 ${range.from}–${range.to}`}
