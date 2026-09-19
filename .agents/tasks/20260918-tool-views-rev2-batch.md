@@ -215,6 +215,26 @@ Reviewer `herzi_rev2review` 完成，记录 commit `3189063`，结论：**需修
 - 资源清理：4 个 worktree / agent（`w1C` `herzi_viewrev2`、`w1D` `herzi_rev2review`、`w1E` `herzi_rev2recheck`、`w1F` `herzi_rev2final`）与对应分支。
 - 浏览器视觉验收：本批核心验收项（16 行观感、高亮配色、diff 背景带、红色是否只落在失败项、滚动条形态），需授权隔离端口/运行时。
 
+## Push 与清理记录（2026-09-19，开发者批准）
+
+**Push**：`git push origin main` → `52d1a96..da78fbc main -> main`；`origin/main` = `da78fbc`，本地领先 **0**。
+
+**清理前核实**（4 个分支）：worktree 均 clean；`git cherry main <branch>` 无 `+` 项（无未合入 patch）；`git diff --name-status main <branch> | grep '^A'` 无输出（无独有文件）。
+
+**执行**：
+
+- 退出 4 个 agent（`herdr pane send-keys <pane> ctrl+d`，pi 的 `app.exit`），确认 live agent 为空。
+- 删除各 worktree 的 gitignored `node_modules`/`dist`，再用 `herdr worktree remove --workspace <w>`（`forced: false`）移除 w1C / w1D / w1E / w1F，四个均返回 `worktree_removed`；`/Users/chiyizi/.herdr/worktrees/herzi/` 已空。
+- 分支：`agent-20260918-tool-views-rev2` 用 `-d`（已 merge）；三个 review 分支的 patch 是通过 cherry-pick 进 main 的，`-d` 会拒绝，因此在上述核实后用 `-D` 删除并记录理由。
+- `/tmp`：清理本批残留 **约 560MB**（`rev2-base` 的 base 分支完整副本、`rev2-baseline-dist`、构建/测试日志、`rev2-escape`、`memoh-registry.ts` 等）。
+
+**结果**：本地只剩 `main`（与 `origin/main` 同步）与主 worktree；Herdr 工作区只剩 `wT`（general）与 `wW`（herzi）；无 live agent。
+
+## 仍待完成
+
+- **真实浏览器视觉验收**（本批核心验收项）：16 行观感、高亮配色、diff 背景带、错误红是否只落在失败项、滚动条形态。需授权隔离端口/运行时。
+- 可选后续：F7 高亮大小上限、N4 既有 `ChatAttachments` flaky、P3（宿主文件读取 / 「查看完整输出」）。
+
 ## 下一步（等开发者通知后由 Integrator 执行）
 
 1. 接收交付：范围检查（尤其确认未改 `src/server/**`、`src/shared/**`、依赖只多了 `shiki`）、worktree clean、记录与实际 diff 相符。
