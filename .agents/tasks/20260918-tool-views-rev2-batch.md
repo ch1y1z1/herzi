@@ -165,6 +165,37 @@ Reviewer `herzi_rev2review` 完成，记录 commit `3189063`，结论：**需修
 
 要求给出发行 CSS 里的静态证据（红色规则与灰色规则的相对位置/胜者），以及可证伪实验（还原后校验 md5）。修复后需再做一次定向复审（只验 N1）才允许集成。
 
+## 第三轮修复与 Integrator 验证（2026-09-19）
+
+**Worker 修复**（`b8ee7a2` fix + `ddbabf4` 记录；4 文件 +397 / −25）：
+
+- **N1**：`.tool-result-error pre` → **`.tool-detail .tool-result-error pre`**（特异性 0,2,1，稳胜 `.tool-detail pre` 的 0,1,1），并在注释里写明为何需要该祖先、以及它在真实 DOM 路径上始终存在（`GenericToolDetail` 只在 `.tool-detail` 内渲染）。
+- **N5**：`styles.test.ts` 新增一个**迷你 CSS 级联解析器**（`specificity` / `matchesPath` / `resolvedColor`，按“特异性优先、顺序次之”判定胜者），断言：失败 result 的 `<pre>` 解析为红色、失败调用的视图输出也红、失败组内的成功兄弟仍是灰、Arguments 仍是灰。
+- **N2**：`styles.css`、`styles.test.ts`、`WebFetchView.tsx` 三处注释统一为「窗口高 16 个代码行」。
+
+**Integrator 独立验证**：
+
+| 验证 | 结果 |
+| --- | --- |
+| 可证伪：选择器降回 `.tool-result-error pre` | **3 个断言 FAIL**（含 `expected '#5e635a' to be '#c2635d'`，正是 N1 原现象）；还原后 md5 一致 |
+| `npx vitest run`（styles + toolViews + ChatView） | PASS（160 tests） |
+| `npm run typecheck` / `npm test` ×2 / `npm run build` | PASS（309 tests ×2） |
+| 发行 CSS 静态证据 | 红规则 `.tool-detail .tool-result-error pre` 特异性 **(0,2,1)** > 灰 `.tool-detail pre` **(0,1,1)**，在前也胜 |
+
+> 自我纠正：我最初用「只看源码顺序」的临时脚本得到“red BEFORE (loses)”的误判 —— 顺序仅在特异性相等时起作用，红色规则特异性更高，结果应为胜出。Worker 的解析器与复审契约均未犯此错。
+
+## 第三轮定向复审派发（2026-09-19）
+
+| 项目 | 值 |
+| --- | --- |
+| 复审分支 | `review-20260918-tool-views-rev2-r3`（base = `ddbabf4`） |
+| 复审 worktree | `/Users/chiyizi/.herdr/worktrees/herzi/review-20260918-tool-views-rev2-r3` |
+| Herdr | workspace `w1F` / pane `w1F:p1` |
+| Reviewer agent | `herzi_rev2final`（pi） |
+| 复审契约 | `.agents/tasks/20260918-tool-views-rev2-review-r3.md`（commit `df0945f`） |
+
+只需验三件：N1 是否真的闭合（含可证伪实验与特异性/顺序的独立计算）、新断言（迷你级联解析器）本身是否可信（逗号列表/`>`/伪类/`!important`/`@layer`/非 color 属性等边界）、N2 注释是否改干净。
+
 ## 下一步（等开发者通知后由 Integrator 执行）
 
 1. 接收交付：范围检查（尤其确认未改 `src/server/**`、`src/shared/**`、依赖只多了 `shiki`）、worktree clean、记录与实际 diff 相符。
